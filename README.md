@@ -603,6 +603,38 @@ python3 build_agent_preference_curriculum.py \
   --output-dir /path/to/new-preference-release
 ```
 
+For long-horizon agent tuning, `build_agent_preference_curriculum_v2.py`
+shifts the mix from generic tool/no-tool choices to exact-state recovery,
+follow-through, skill routing, permission, premature-stop, and verified-finish
+preferences. It requires the exact target tokenizer while selecting rows,
+caps each Open-SWE parent to one row per split and behavior family, and refuses
+a release if generic replay is not the minority or one source exceeds half of
+either split. Source-executed Open-SWE transitions remain explicitly distinct
+from locally replayed verifier evidence.
+
+Run the builder in the same pinned container used by the DPO runtime so the
+selection-time tokenizer and independent preflight tokenizer are identical:
+
+```bash
+docker run --rm --network=none \
+  --user "$(id -u):$(id -g)" \
+  --workdir /workspace --env HOME=/tmp --env HF_HOME=/tmp/hf \
+  --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
+  --env PYTHONPATH=/workspace \
+  --mount type=bind,src="$PWD",dst=/workspace,readonly \
+  --mount type=bind,src=/data-120,dst=/data-120 \
+  --entrypoint python ai-data-extraction/unsloth-xpu-dpo:trl028 \
+  /workspace/build_agent_preference_curriculum_v2.py \
+  --skill-release /path/to/qualified-skill-sft-release \
+  --sft-release /path/to/qualified-balanced-sft-release \
+  --when2call-source /path/to/pinned/when2call_train_pref.jsonl \
+  --when2call-revision <immutable-revision> \
+  --evaluation-cases /path/to/held-out-cases.jsonl \
+  --model-dir /data-120/models/Qwen3.5-9B \
+  --blocked-text-pattern '<forbidden-model-facing-pattern>' \
+  --output-dir /path/to/new-v2-preference-release
+```
+
 The local Qwen3.5-9B Intel XPU reference runtime is under `runtime/dpo/`.
 Its image pins TRL by wheel hash, validates rows with the exact tokenizer and
 chat template, pretokenizes both branches without truncation, loads the same

@@ -74,7 +74,11 @@ def validate_pair(row: dict[str, Any], *, expected_split: str) -> None:
         raise ValueError("preference pair split mismatch")
     if not isinstance(row.get("pair_id"), str) or not row["pair_id"]:
         raise ValueError("preference pair identity missing")
-    if row.get("lane") not in {"skill_policy_preference", "tool_decision_preference"}:
+    if row.get("lane") not in {
+        "skill_policy_preference",
+        "state_transition_preference",
+        "tool_decision_preference",
+    }:
         raise ValueError("preference pair lane is invalid")
     prompt = row.get("prompt")
     chosen = row.get("chosen")
