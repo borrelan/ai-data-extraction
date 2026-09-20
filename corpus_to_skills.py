@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from build_training_data import NormalizationState, clean_value
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -48,24 +50,27 @@ def discover_jsonl(paths: Iterable[Path]) -> list[Path]:
 
 
 def render_conversation(record: Any, *, source_file: Path, line_number: int) -> str:
-    """Render useful corpus fields without adding instructions of our own."""
+    """Render only cleaned, non-identifying fields for skill synthesis."""
     if not isinstance(record, dict):
         return ""
 
     selected: dict[str, Any] = {}
     for key in (
+        "schema_version",
+        "dataset",
         "source",
-        "name",
-        "title",
-        "session_id",
-        "project_path",
+        "tags",
         "messages",
-        "tool_results",
+        "events",
+        "tools",
+        "quality",
     ):
         if key in record:
             selected[key] = record[key]
     if not selected:
-        selected = record
+        return ""
+    state = NormalizationState()
+    selected = clean_value(selected, state, privacy_enabled=True)
     return (
         f"Source file: {source_file.name}, record: {line_number}\n"
         + json.dumps(selected, ensure_ascii=False, separators=(",", ":"))

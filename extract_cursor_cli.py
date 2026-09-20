@@ -12,6 +12,7 @@ content-addressed blob store:
 Walking refs from latestRootBlobId reconstructs messages in order.
 """
 import json
+import os
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
@@ -154,7 +155,7 @@ def main():
     print(f'By role: {dict(roles)}')
     print(f'With code/tool context: {sum(1 for c in all_convs if c["has_code_context"]):,}')
 
-    out_dir = Path('extracted_data')
+    out_dir = Path(os.environ.get('EXTRACTED_DATA_DIR', 'extracted_data'))
     out_dir.mkdir(exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_file = out_dir / f'cursor_cli_{ts}.jsonl'

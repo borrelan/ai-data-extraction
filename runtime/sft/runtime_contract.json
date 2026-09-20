@@ -1,0 +1,108 @@
+{
+  "schema": "ai-data-extraction/sft-runtime-contract/v1",
+  "container": {
+    "primary_image": {
+      "tag": "ai-data-extraction/unsloth-xpu:torch2120-768d644",
+      "id": "sha256:5f0361b760c438c41ea17416c01ebcf3ed4d57b86d4cf9618f83a3db2121093c",
+      "build_file": "runtime/sft/Dockerfile",
+      "unsloth_revision": "768d644036a948441ba80b626c9e747c1fecfbae"
+    },
+    "base_image": "docker.io/intel/pytorch:xpu-2.13.0-ubuntu24.04@sha256:7366f264bd7aaa7f0df7d1bfba43be7c84c126df21ba448ae5445a34c2def4f9",
+    "primary_role": "local Intel XPU 9B QLoRA qualification and training",
+    "local_pull_allowed": false
+  },
+  "accelerator": {
+    "type": "xpu",
+    "device": "Intel Arc Pro B70",
+    "total_memory_bytes": 34242297856,
+    "device_mount": "/dev/dri",
+    "runpod_allowed": false
+  },
+  "python": "3.12",
+  "packages": {
+    "torch": "2.12.0+xpu",
+    "transformers": "5.5.0",
+    "trl": "0.24.0",
+    "peft": "0.21.0",
+    "accelerate": "1.15.0",
+    "datasets": "4.3.0",
+    "bitsandbytes": "0.50.3.dev0",
+    "triton-xpu": "3.7.1",
+    "unsloth": "2026.9.7",
+    "unsloth_zoo": "2026.9.6"
+  },
+  "model": {
+    "repo_id": "Qwen/Qwen3.5-9B",
+    "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "container_path": "/models/Qwen3.5-9B",
+    "loader": "Unsloth FastLanguageModel",
+    "loaded_class": "Qwen3_5ForConditionalGeneration",
+    "processing_class": "Qwen3VLProcessor",
+    "text_tokenizer_class": "TokenizersBackend",
+    "modality": "text-only",
+    "expected_parent_model_type": "qwen3_5",
+    "expected_text_model_type": "qwen3_5_text",
+    "expected_text_class": "Qwen3_5ForCausalLM"
+  },
+  "quantization": {
+    "load_in_4bit": true,
+    "bnb_4bit_quant_type": "nf4",
+    "bnb_4bit_compute_dtype": "bfloat16",
+    "bnb_4bit_use_double_quant": true
+  },
+  "peft": {
+    "task_type": "CAUSAL_LM",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj",
+      "in_proj_qkv",
+      "in_proj_z",
+      "out_proj"
+    ],
+    "smoke_rank": 2,
+    "smoke_alpha": 4,
+    "required_target_fragments": [
+      ".linear_attn.in_proj_qkv",
+      ".linear_attn.in_proj_z",
+      ".linear_attn.out_proj",
+      ".self_attn.q_proj",
+      ".self_attn.o_proj",
+      ".mlp.gate_proj",
+      ".mlp.down_proj"
+    ],
+    "forbidden_target_fragment": ".visual."
+  },
+  "artifact": {
+    "type": "standard-peft-adapter",
+    "required_files": ["adapter_config.json", "adapter_model.safetensors"]
+  },
+  "training": {
+    "dataset_schema": "ai-data-extraction/agent-sft-pilot/v1",
+    "dataset_path": "/data-120/ai-training/datasets/qwen3.5-9b-agent-sft-pilot-v2",
+    "max_sequence_tokens": 8192,
+    "loss": "final-assistant-turn-only",
+    "packing": false,
+    "epochs": 1,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "learning_rate": 0.0001,
+    "seed": 20260920,
+    "checkpoint_steps": 10,
+    "adapter_host_path": "/data-120/models/adapters/Qwen3.5-9B-agent-sft-pilot-v2",
+    "run_host_path": "/data-120/ai-training/runs/qwen3.5-9b-agent-sft-pilot-v2-seed20260920"
+  },
+  "qualification": {
+    "network_required": false,
+    "short_canary_report_sha256": "1504272d85114500d26f75547048fd0672114c726bda00a5245ea19a84e83281",
+    "longest_canary_report_sha256": "5725703fceecc2b220cb30d511432c36439b40728e57df3526e59858c07b67ec",
+    "longest_sequence_tokens": 7184,
+    "longest_peak_allocated_bytes": 19229788672,
+    "longest_peak_reserved_bytes": 20428357632,
+    "adapter_save_reload": true
+  }
+}

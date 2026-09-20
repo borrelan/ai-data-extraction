@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -91,10 +93,13 @@ def filter_jsonl(
     return stats
 
 
-def discover_inputs(paths: Iterable[Path]) -> list[tuple[Path, Path]]:
+def discover_inputs(
+    paths: Iterable[Path], *, excluded_dir: Path | None = None
+) -> list[tuple[Path, Path]]:
     """Return input files paired with their relative output paths."""
     discovered: list[tuple[Path, Path]] = []
     seen_outputs: dict[Path, Path] = {}
+    excluded = excluded_dir.resolve() if excluded_dir else None
 
     for path in paths:
         if path.is_file():
@@ -109,6 +114,9 @@ def discover_inputs(paths: Iterable[Path]) -> list[tuple[Path, Path]]:
             raise FileNotFoundError(f"Input path does not exist: {path}")
 
         for input_path, relative_output in candidates:
+            resolved = input_path.resolve()
+            if excluded and (resolved == excluded or excluded in resolved.parents):
+                continue
             previous = seen_outputs.get(relative_output)
             if previous is not None and previous.resolve() != input_path.resolve():
                 raise ValueError(
@@ -121,6 +129,38 @@ def discover_inputs(paths: Iterable[Path]) -> list[tuple[Path, Path]]:
     if not discovered:
         raise ValueError("No JSONL inputs found")
     return discovered
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_manifest(
+    output_dir: Path, outputs: list[dict[str, object]], *, overwrite: bool = False
+) -> None:
+    """Write provenance for filtered files without recording absolute paths."""
+    manifest = {
+        "schema_version": "privacy-filter/v1",
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "model": MODEL_ID,
+        "outputs": outputs,
+        "warning": (
+            "Privacy Filter is a local data-minimization aid, not an anonymization "
+            "or compliance guarantee; review outputs before training or sharing."
+        ),
+    }
+    target = output_dir / "privacy_manifest.json"
+    if target.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite {target}; pass --overwrite to replace it"
+        )
+    temporary = output_dir / ".privacy_manifest.json.tmp"
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, target)
 
 
 def load_redactor(*, checkpoint: str | None, device: str) -> Callable[[str], str]:
@@ -185,10 +225,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        inputs = discover_inputs(args.inputs)
+        inputs = discover_inputs(args.inputs, excluded_dir=args.output_dir)
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        if not args.overwrite:
+            existing = [
+                args.output_dir / relative_output
+                for _, relative_output in inputs
+                if (args.output_dir / relative_output).exists()
+            ]
+            manifest_target = args.output_dir / "privacy_manifest.json"
+            if manifest_target.exists():
+                existing.append(manifest_target)
+            if existing:
+                raise FileExistsError(
+                    "Refusing to overwrite existing privacy outputs: "
+                    + ", ".join(str(path) for path in existing)
+                )
         redact = load_redactor(checkpoint=args.checkpoint, device=args.device)
 
         totals = FilterStats()
+        output_manifest: list[dict[str, object]] = []
         for input_path, relative_output in inputs:
             output_path = args.output_dir / relative_output
             stats = filter_jsonl(
@@ -200,6 +256,14 @@ def main(argv: list[str] | None = None) -> int:
             totals.records += stats.records
             totals.strings += stats.strings
             totals.changed_strings += stats.changed_strings
+            output_manifest.append(
+                {
+                    "name": relative_output.as_posix(),
+                    "sha256": sha256_file(output_path),
+                    "records": stats.records,
+                    "changed_strings": stats.changed_strings,
+                }
+            )
             print(
                 f"Filtered {stats.records:,} records from {input_path} -> {output_path} "
                 f"({stats.changed_strings:,}/{stats.strings:,} strings changed)"
@@ -207,8 +271,10 @@ def main(argv: list[str] | None = None) -> int:
 
         print(
             f"Complete: {totals.records:,} records; "
-            f"{totals.changed_strings:,}/{totals.strings:,} strings changed"
-        )
+                f"{totals.changed_strings:,}/{totals.strings:,} strings changed"
+            )
+
+        write_manifest(args.output_dir, output_manifest, overwrite=args.overwrite)
         return 0
     except (FileNotFoundError, FileExistsError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

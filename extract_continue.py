@@ -5,6 +5,7 @@ Includes: messages, tool calls, reasoning, context
 """
 
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -121,7 +122,7 @@ def main():
     print()
 
     # Save
-    output_dir = Path('extracted_data')
+    output_dir = Path(os.environ.get('EXTRACTED_DATA_DIR', 'extracted_data'))
     output_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

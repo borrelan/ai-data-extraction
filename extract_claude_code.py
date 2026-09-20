@@ -5,18 +5,31 @@ Includes: messages, code context, diffs, file references
 Auto-discovers Claude Code installations on the device
 """
 
-import json
-import sqlite3
-from pathlib import Path
-from datetime import datetime
+import argparse
 import hashlib
-import platform
+import json
 import os
+import platform
+from datetime import datetime, timezone
+from pathlib import Path
 
-def find_claude_installations():
+from inventory_sources import discover_roots
+from source_manifest import SourceManifestIndex, validate_source_admission
+
+EXTRACTOR_VERSION = '1.2.0'
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def find_claude_installations(home=None):
     """Find all Claude Code installation directories"""
     system = platform.system()
-    home = Path.home()
+    home = (home or Path.home()).expanduser()
 
     # Common installation locations by OS
     locations = []
@@ -63,7 +76,30 @@ def find_claude_installations():
 
     return list(set(locations))  # Remove duplicates
 
-def extract_claude_project_conversations(project_dir):
+
+def _admission_metadata(admission):
+    if admission is None:
+        return {}
+    return {
+        'source_manifest_revision': admission['source_manifest_revision'],
+        'source_ref_sha256': admission['source_ref_sha256'],
+        'source_snapshot_status': admission['source_snapshot_status'],
+    }
+
+
+def _append_source_manifest(source_manifest, entry, admission):
+    if source_manifest is None:
+        return
+    entry.update(_admission_metadata(admission))
+    source_manifest.append(entry)
+
+def extract_claude_project_conversations(
+    project_dir,
+    *,
+    source_manifest=None,
+    source_ledger=None,
+    root_label='primary',
+):
     """Extract conversations from a Claude project directory with full context"""
     conversations = []
 
@@ -73,20 +109,48 @@ def extract_claude_project_conversations(project_dir):
         # New structure: projects/project-name/session.jsonl
         for proj in (project_dir / 'projects').iterdir():
             if proj.is_dir():
-                jsonl_files.extend(list(proj.glob('*.jsonl')))
+                # Sidechain transcripts live below project/subagents and are
+                # first-class source sessions for an optional lane.
+                jsonl_files.extend(list(proj.rglob('*.jsonl')))
     else:
         # Old structure: direct JSONL files
         jsonl_files = list(project_dir.glob('*.jsonl'))
 
-    # Filter out agent files
-    jsonl_files = [f for f in jsonl_files if not f.name.startswith('agent-')]
+    jsonl_files = sorted(set(jsonl_files))
 
     for jsonl_file in jsonl_files:
+        is_subagent = jsonl_file.name.startswith('agent-')
+        source_class = 'subagent_session' if is_subagent else 'session_active'
+        training_lane = 'optional_alt' if is_subagent else 'primary'
+        source_sha256 = None
+        source_bytes = None
+        source_admission = None
+        try:
+            source_sha256 = _sha256_file(jsonl_file)
+            source_bytes = jsonl_file.stat().st_size
+            if source_ledger is not None:
+                source_admission = source_ledger.admit(
+                    source_sha256=source_sha256,
+                    provider='claude-code',
+                    root_label=root_label,
+                    source_class=source_class,
+                )
+                source_admission = validate_source_admission(
+                    source_admission,
+                    source_sha256=source_sha256,
+                    source_bytes=source_bytes,
+                )
+        except OSError:
+            pass
         try:
             messages = []
             session_id = jsonl_file.stem
             project_path = None
             project_name = jsonl_file.parent.name if jsonl_file.parent.name != 'projects' else None
+            parse_errors = 0
+            parent_session_id = None
+            agent_id = None
+            sidechain = is_subagent
 
             with open(jsonl_file, 'r') as f:
                 for line in f:
@@ -95,6 +159,11 @@ def extract_claude_project_conversations(project_dir):
 
                     try:
                         obj = json.loads(line)
+                        if parent_session_id is None and obj.get('sessionId'):
+                            parent_session_id = obj.get('sessionId')
+                        if agent_id is None and obj.get('agentId'):
+                            agent_id = obj.get('agentId')
+                        sidechain = sidechain or bool(obj.get('isSidechain'))
                         msg_type = obj.get('type')
 
                         if msg_type == 'user':
@@ -124,7 +193,6 @@ def extract_claude_project_conversations(project_dir):
 
                             # Extract text from content array
                             text_parts = []
-                            code_blocks = []
                             tool_uses = []
 
                             if isinstance(content, list):
@@ -162,26 +230,116 @@ def extract_claude_project_conversations(project_dir):
                                 messages[-1]['tool_results'].append(tool_result)
 
                     except json.JSONDecodeError:
+                        parse_errors += 1
                         continue
 
+            emitted_records = 0
             if messages:
-                conversations.append({
+                conversation = {
                     'messages': messages,
                     'source': 'claude-code',
+                    'source_class': source_class,
+                    'training_lane': training_lane,
                     'session_id': session_id,
                     'project_path': project_path,
                     'project_name': project_name,
                     'source_file': str(jsonl_file),
-                    'installation': str(project_dir)
-                })
+                    'installation': str(project_dir),
+                    'source_origin': {
+                        'provider': 'claude-code',
+                        'source_class': source_class,
+                        'source_file_name': jsonl_file.name,
+                        'source_file_sha256': source_sha256,
+                        'source_root_label': root_label,
+                        'parent_session_id': parent_session_id,
+                        'agent_id': agent_id,
+                        'sidechain': sidechain,
+                        'extractor_version': EXTRACTOR_VERSION,
+                        'content_policy': 'reasoning_omitted_at_adapter; canonical_builder_required',
+                    },
+                }
+                conversation['source_origin'].update(_admission_metadata(source_admission))
+                if parse_errors:
+                    conversation['source_parse_errors'] = parse_errors
+                conversations.append(conversation)
+                emitted_records = 1
+
+            _append_source_manifest(source_manifest, {
+                    'provider': 'claude-code',
+                    'source_class': source_class,
+                    'training_lane': training_lane,
+                    'source_file_name': jsonl_file.name,
+                    'source_file_sha256': source_sha256,
+                    'source_bytes': source_bytes,
+                    'source_root_label': root_label,
+                    'session_id': session_id,
+                    'parent_session_id': parent_session_id,
+                    'agent_id': agent_id,
+                    'sidechain': sidechain,
+                    'parse_errors': parse_errors,
+                    'emitted_records': emitted_records,
+                    'status': 'emitted' if emitted_records else 'no_emitted_messages',
+                }, source_admission)
 
         except Exception as e:
+            if source_manifest is not None:
+                _append_source_manifest(source_manifest, {
+                    'provider': 'claude-code',
+                    'source_class': source_class,
+                    'training_lane': training_lane,
+                    'source_file_name': jsonl_file.name,
+                    'source_file_sha256': source_sha256,
+                    'source_bytes': source_bytes,
+                    'source_root_label': root_label,
+                    'status': 'read_error',
+                    'error_type': type(e).__name__,
+                }, source_admission)
+            if source_ledger is not None:
+                raise
             print(f"Error processing {jsonl_file}: {e}")
             continue
 
     return conversations
 
-def main():
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--source-home',
+        type=Path,
+        help='explicit immutable synthetic HOME or live home containing provider roots',
+    )
+    parser.add_argument(
+        '--source-manifest',
+        type=Path,
+        help='validated source ledger used for fail-closed byte admission',
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=Path,
+        default=Path(os.environ.get('EXTRACTED_DATA_DIR', 'extracted_data')),
+    )
+    return parser
+
+
+def _installation_specs(source_home):
+    if source_home is not None:
+        return [
+            (root.path, root.label)
+            for root in discover_roots(source_home)
+            if root.provider == 'claude'
+        ]
+    home = Path.home()
+    labels = {
+        home / name: f'root-{index}'
+        for index, name in enumerate(
+            ('.claude', '.claude-code', '.claude-local', '.claude-m2', '.claude-zai')
+        )
+    }
+    return [(path, labels.get(path, 'primary')) for path in find_claude_installations()]
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     print("="*80)
     print("CLAUDE CODE COMPLETE DATA EXTRACTION")
     print("="*80)
@@ -189,7 +347,7 @@ def main():
 
     # Find all Claude installations
     print("🔍 Searching for Claude Code installations...")
-    installations = find_claude_installations()
+    installations = _installation_specs(args.source_home)
 
     if not installations:
         print("❌ No Claude Code installations found!")
@@ -202,19 +360,30 @@ def main():
 
     # Extract from all installations
     all_conversations = []
+    source_manifest = []
+    source_ledger = (
+        SourceManifestIndex.from_path(args.source_manifest)
+        if args.source_manifest is not None
+        else None
+    )
     installation_stats = {}
 
-    for installation in installations:
+    for installation, root_label in installations:
         print(f"📂 Processing: {installation}")
 
-        conversations = extract_claude_project_conversations(installation)
+        conversations = extract_claude_project_conversations(
+            installation,
+            source_manifest=source_manifest,
+            source_ledger=source_ledger,
+            root_label=root_label,
+        )
 
         if conversations:
             all_conversations.extend(conversations)
             installation_stats[str(installation)] = len(conversations)
             print(f"   ✅ {len(conversations)} conversations")
         else:
-            print(f"   ⚠️  No conversations found")
+            print("   ⚠️  No conversations found")
 
     print()
     print("="*80)
@@ -245,20 +414,37 @@ def main():
     print()
 
     # Save to organized JSONL
-    output_dir = Path('extracted_data')
-    output_dir.mkdir(exist_ok=True)
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
     output_file = output_dir / f'claude_code_conversations_{timestamp}.jsonl'
 
     with open(output_file, 'w') as f:
-        for conv in all_conversations:
-            f.write(json.dumps(conv, ensure_ascii=False) + '\n')
+        f.writelines(json.dumps(conv, ensure_ascii=False) + '\n' for conv in all_conversations)
 
     file_size = output_file.stat().st_size / 1024 / 1024
     print(f"✅ Saved to: {output_file}")
     print(f"   Size: {file_size:.2f} MB")
-    print(f"   Format: JSONL (one conversation per line)")
+    print("   Format: JSONL (one conversation per line)")
+
+    manifest_file = output_dir / f'claude_code_source_manifest_{timestamp}.json'
+    manifest = {
+        'schema_version': 'ai-data-extraction/claude-source-manifest/v1',
+        'extractor_version': EXTRACTOR_VERSION,
+        'provider': 'claude-code',
+        'source_files': source_manifest,
+        'counts': {
+            'source_files': len(source_manifest),
+            'emitted_files': sum(item.get('emitted_records', 0) > 0 for item in source_manifest),
+            'empty_files': sum(item.get('status') == 'no_emitted_messages' for item in source_manifest),
+            'read_errors': sum(item.get('status') == 'read_error' for item in source_manifest),
+        },
+    }
+    with manifest_file.open('w', encoding='utf-8') as destination:
+        json.dump(manifest, destination, ensure_ascii=False, indent=2)
+        destination.write('\n')
+    print(f"✅ Source manifest: {manifest_file}")
 
 if __name__ == '__main__':
     main()

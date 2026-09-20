@@ -1,5 +1,11 @@
 # Exclude extracted data (user's private conversations)
 extracted_data/
+filtered_data/
+training_data/
+generated_skills/
+source_inventory*.json
+.tmp/
+.fastembed_cache/
 
 # Python cache
 __pycache__/

@@ -1,0 +1,153 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_skill",
+      "description": "Load the complete instructions for a named skill before applying it.",
+      "parameters": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read a file without changing it.",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_code",
+      "description": "Search raw source text in the current repository.",
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "code_index_status",
+      "description": "Inspect Code Indexer health and provenance before trusting indexed results.",
+      "parameters": {
+        "type": "object",
+        "properties": {"repository": {"type": "string"}},
+        "required": ["repository"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "code_index_search",
+      "description": "Search a qualified Code Indexer graph.",
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "lsp_diagnostics",
+      "description": "Read language-server diagnostics for one file.",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_tests",
+      "description": "Run a bounded test command.",
+      "parameters": {
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "apply_patch",
+      "description": "Apply a bounded source patch.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "patch": {"type": "string"}
+        },
+        "required": ["path", "patch"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "git_status",
+      "description": "Read the current Git worktree status.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "report_blocker",
+      "description": "Stop the current path and report an evidenced blocker.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": {"type": "string"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["reason", "evidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "finish_task",
+      "description": "Terminate after the requested outcome is verified.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {"type": "string"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["summary", "evidence"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

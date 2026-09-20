@@ -15,6 +15,7 @@ from corpus_to_skills import (
     validate_skills,
     write_skills,
 )
+from corpus_to_skills import render_conversation
 
 
 class FakeResponse(io.BytesIO):
@@ -46,6 +47,26 @@ class CorpusSamplingTests(unittest.TestCase):
             self.assertGreater(selected_count, 0)
             self.assertEqual(total_count, 5)
             self.assertIn("messages", sampled)
+
+    def test_skill_synthesis_renderer_drops_reasoning_and_identifiers(self):
+        rendered = render_conversation(
+            {
+                "source": "codex",
+                "session_id": "do-not-send",
+                "project_path": "/home/alice/private",
+                "messages": [
+                    {"role": "user", "content": "Use <think>private</think> the owner."},
+                    {"role": "assistant", "content": "The owner is explicit."},
+                ],
+            },
+            source_file=Path("raw.jsonl"),
+            line_number=1,
+        )
+
+        self.assertIn("The owner is explicit.", rendered)
+        self.assertNotIn("private", rendered)
+        self.assertNotIn("do-not-send", rendered)
+        self.assertNotIn("project_path", rendered)
 
 
 class ModelClientTests(unittest.TestCase):

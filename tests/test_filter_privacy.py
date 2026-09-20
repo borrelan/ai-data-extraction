@@ -3,7 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from filter_privacy import FilterStats, discover_inputs, filter_jsonl, redact_value
+from filter_privacy import (
+    FilterStats,
+    discover_inputs,
+    filter_jsonl,
+    redact_value,
+    sha256_file,
+    write_manifest,
+)
 
 
 def fake_redact(text):
@@ -88,6 +95,42 @@ class DiscoverInputsTests(unittest.TestCase):
             self.assertEqual(
                 discover_inputs([root]), [(input_path, Path("nested/corpus.jsonl"))]
             )
+
+    def test_excludes_output_directory_when_input_is_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.jsonl"
+            output = root / "filtered"
+            output.mkdir()
+            generated = output / "source.jsonl"
+            source.write_text("{}\n", encoding="utf-8")
+            generated.write_text("{}\n", encoding="utf-8")
+
+            self.assertEqual(
+                discover_inputs([root], excluded_dir=output), [(source, Path("source.jsonl"))]
+            )
+
+
+class ManifestTests(unittest.TestCase):
+    def test_manifest_records_output_hash_without_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "filtered"
+            output.mkdir()
+            filtered = output / "source.jsonl"
+            filtered.write_text("{}\n", encoding="utf-8")
+
+            write_manifest(
+                output,
+                [{"name": "source.jsonl", "sha256": sha256_file(filtered), "records": 1}],
+            )
+            manifest = json.loads((output / "privacy_manifest.json").read_text())
+
+            self.assertEqual(manifest["outputs"][0]["name"], "source.jsonl")
+            self.assertNotIn(str(root), (output / "privacy_manifest.json").read_text())
+
+            with self.assertRaises(FileExistsError):
+                write_manifest(output, [])
 
 
 if __name__ == "__main__":

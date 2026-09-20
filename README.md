@@ -1,16 +1,52 @@
-# AI Coding Assistant Training Data Extraction Toolkit
+# AI Coding Assistant Corpus and Training-Data Toolkit
 
-Complete toolkit to extract ALL chat, agent, and code context data from AI coding assistants for machine learning training.
+Extract local Codex, Claude, Gemini, Cursor, Continue, OpenCode, Prime Agent,
+Pi/Oh My Pi, Trae, and Windsurf histories, then normalize them through one
+privacy-gated boundary for SFT, explicit preference, trajectory, and
+prompt-only RL preparation. Raw exports are evidence and provenance; they are
+not trainer input.
 
 ## 🎯 What This Does
 
-Automatically discovers and extracts **complete conversation history** including:
+The extractor layer discovers conversation history including:
 - ✅ User messages & AI responses
 - ✅ Code context (file paths, line numbers, snippets)
 - ✅ Code diffs and suggested edits
 - ✅ Multi-file contexts
 - ✅ Tool use and execution results
 - ✅ Timestamps and metadata
+
+The canonical builder then:
+
+- removes reasoning fields and tagged reasoning blocks;
+- normalizes roles, tool calls, tool results, diffs, context, and optional tool schemas;
+- adds deterministic IDs, splits, provider/task/outcome/privacy tags, and provenance hashes;
+- preflights quality per source session before chunking, then stamps every
+  segment with the same provider-neutral gate and `session_quality_id`;
+- preserves only explicit rewards and chosen/rejected pairs; it never invents labels;
+- writes `sft.jsonl`, `trajectories.jsonl`, `tool_traces.jsonl`,
+  `action_windows.jsonl`, `preferences.jsonl`, `rl_prompts.jsonl`,
+  `rejected.jsonl`, and a manifest.
+
+See [`docs/TRAINING_DATA.md`](docs/TRAINING_DATA.md) for the contract and
+[`docs/TOOL_USE_TRAINING.md`](docs/TOOL_USE_TRAINING.md) for the tool-use,
+DevOps, skill/MCP, and RL-facing data contract.
+The harness-owned skill/MCP/permission trace is specified in
+[`docs/HARNESS_TRACE_CONTRACT.md`](docs/HARNESS_TRACE_CONTRACT.md).
+The proposed long-session event/episode/action-window contract is in
+[`docs/SCHEMA_DESIGN.md`](docs/SCHEMA_DESIGN.md).
+
+Prime Agent and Pi-family sources are retained in explicit provenance lanes:
+ordinary sessions are `optional_alt`, while advisor overlays are
+`quarantine`. This is not a blanket quality judgment. Each inspected session
+also receives a provider-neutral quality gate and flags; local-model
+provenance is recorded as evidence, not treated as failure. The default
+builder includes only `primary`; opt into another lane with
+`--training-lanes optional_alt` after the session-level quality review.
+
+Task-specific research decisions, audits, source inventories, run checkpoints,
+and evaluation notes are kept in the local gitignored `.tmp/` directory and
+are not product documentation or trainer input.
 
 ## 📦 Included Scripts
 
@@ -59,7 +95,7 @@ Extracts from Continue AI Assistant
 - **Includes**:
   - User/assistant messages
   - Tool calls and results
-  - Reasoning blocks
+  - Raw reasoning blocks (removed by the canonical builder)
   - Context items
   - Workspace information
 
@@ -69,7 +105,7 @@ Extracts from Google Gemini CLI
 - **Formats**: JSON session files
 - **Includes**:
   - User/assistant messages
-  - Thoughts (reasoning steps with timestamps)
+  - Raw thoughts (removed by the canonical builder)
   - Token usage breakdown
   - Model information
   - Project hash and workspace linking
@@ -94,7 +130,21 @@ Extracts from OpenCode (CLI + Desktop)
   - legacy JSON storage layouts under `storage/message`, `storage/part`, and `storage/session`
   - sidecar metadata from `storage/session_diff`, `storage/directory-readme`, `storage/agent-usage-reminder`, and `storage/rules-injector`
 
-### 9. `extract_cursor_cli.py`
+### 9. `extract_agent_sessions.py`
+Extracts Prime Agent, Pi, and Oh My Pi JSONL session streams.
+- **Searches**: `~/.prime/agent/sessions`, Prime subagent session artifacts,
+  `~/.omp/agent/sessions`, discovered Oh My Pi backups, and narrow standalone
+  Pi session locations
+- **Includes**: visible user/assistant/tool messages, tool-call IDs,
+  bounded arguments/observations, source hashes, and chunk lineage
+- **Omits**: thinking blocks and raw harness/advisor control payloads
+- **Lanes**: Prime/ordinary Pi sessions are `optional_alt`; `__advisor.jsonl`
+  is `quarantine` and is excluded from the default build
+- **Quality**: every session gets `candidate`, `review_required`, or
+  `quarantine` from structural evidence independent of provider/model; use
+  `--quality-overrides` for an explicit per-session review decision
+
+### 10. `extract_cursor_cli.py`
 Extracts from the `cursor-agent` terminal CLI (the Composer/Agent history that the GUI
 extractor in `extract_cursor.py` does not cover)
 - **Searches**: `~/.cursor/chats/<chatId>/<agentId>/store.db` (all platforms)
@@ -112,8 +162,8 @@ extractor in `extract_cursor.py` does not cover)
 ### Installation
 
 ```bash
-# No dependencies required - uses Python 3 standard library
-python3 --version  # Ensure Python 3.6+ is installed
+# Extractors and the canonical builder use the Python 3 standard library.
+python3 --version  # Python 3.10+ is required
 ```
 
 ### Basic Usage
@@ -127,6 +177,9 @@ python3 extract_cursor.py
 
 # Extract from Codex
 python3 extract_codex.py
+
+# Include Codex .jsonl.backup stores as an explicitly tagged source class
+INCLUDE_CODEX_BACKUPS=1 python3 extract_codex.py
 
 # Extract from Trae
 python3 extract_trae.py
@@ -143,16 +196,86 @@ python3 extract_gemini.py
 # Extract from OpenCode
 python3 extract_opencode.py
 
+# Extract Prime Agent / Pi / Oh My Pi (advisor overlays are quarantined)
+python3 extract_agent_sessions.py
+
+# Run snapshot-backed adapters without changing process HOME or reading live stores
+python3 extract_claude_code.py \
+  --source-home /path/to/snapshot/home \
+  --source-manifest /path/to/source_manifest.json \
+  --output-dir extracted_data
+python3 extract_gemini.py --source-home /path/to/snapshot/home \
+  --source-manifest /path/to/source_manifest.json \
+  --output-dir extracted_data
+python3 extract_agent_sessions.py --source-home /path/to/snapshot/home \
+  --source-manifest /path/to/source_manifest.json \
+  --output-dir extracted_data
+python3 extract_opencode.py --source-home /path/to/snapshot/home \
+  --source-manifest /path/to/source_manifest.json \
+  --output-dir extracted_data
+python3 extract_codex.py --source-home /path/to/snapshot/home \
+  --source-manifest /path/to/source_manifest.json \
+  --output extracted_data/codex.jsonl
+
+# Apply explicit per-session quality decisions without changing source lanes
+python3 extract_agent_sessions.py \
+  --quality-overrides .tmp/quality_overrides.json
+
 # Extract from Cursor CLI (cursor-agent)
 python3 extract_cursor_cli.py
 
 # Extract from ALL tools at once
 ./extract_all.sh
+
+# extract_all.sh forwards SOURCE_HOME and SOURCE_MANIFEST to adapters that
+# support stable-snapshot admission; set INCLUDE_CODEX_BACKUPS=1 explicitly
+# when backup sessions are in scope.
+SOURCE_HOME=/path/to/snapshot/home \
+SOURCE_MANIFEST=/path/to/source_manifest.json \
+INCLUDE_CODEX_BACKUPS=1 \
+./extract_all.sh
+
+# Inventory every discovered store without copying source content
+python3 inventory_sources.py --output source_inventory.json
+
+# Preflight JSONL and backup lines before the expensive canonical build
+python3 preflight_sources.py extracted_data --output .tmp/source_preflight.json \
+  --overwrite
+
+# Build review-gated datasets from raw exports without external dependencies
+python3 build_training_data.py extracted_data --output-dir training_data
+
+# Apply provider-neutral per-session quality decisions at the canonical boundary
+python3 build_training_data.py extracted_data --output-dir training_data_reviewed \
+  --quality-overrides .tmp/quality_overrides.json \
+  --quality-gates candidate,review_required
+
+# Build a separately reviewed optional-alt lane (never mix by accident)
+python3 build_training_data.py extracted_data \
+  --output-dir training_data_optional_alt \
+  --training-lanes optional_alt \
+  --quality-gates candidate
+
+# Include sessions awaiting manual quality review in an explicitly named audit build
+python3 build_training_data.py extracted_data \
+  --output-dir training_data_optional_alt_review \
+  --training-lanes optional_alt \
+  --quality-gates candidate,review_required
+
+# Optional: model-assisted privacy filtering, then bind the exact manifest
+python3 -m pip install -r requirements-privacy-filter.txt
+python3 filter_privacy.py extracted_data --output-dir filtered_data --device cuda
+python3 build_training_data.py filtered_data \
+  --output-dir training_data \
+  --privacy-mode filtered \
+  --privacy-manifest filtered_data/privacy_manifest.json \
+  --privacy-approved
 ```
 
 ### Output
 
-All scripts create an `extracted_data/` directory with timestamped JSONL files:
+Extractors create timestamped raw JSONL files under `extracted_data/`. The
+builder writes separate, ignored training outputs under `training_data/`:
 
 ```
 extracted_data/
@@ -163,42 +286,43 @@ extracted_data/
 ├── trae_conversations_20250116_143115.jsonl
 ├── windsurf_conversations_20250116_143130.jsonl
 ├── continue_conversations_20250116_143145.jsonl
-└── opencode_conversations_20250116_143200.jsonl
+├── opencode_conversations_20250116_143200.jsonl
+├── prime_agent_sessions_20250116_143205.jsonl
+├── pi_sessions_20250116_143205.jsonl
+└── pi_advisor_quarantine_20250116_143205.jsonl
 ```
+
+The `training_data/` directory is deliberately not a raw merge: its files have
+different contracts and must be consumed by dataset type.
 
 ## 📊 Output Format
 
-Each conversation is a single JSON line in JSONL format:
+Extractor output is provider-specific JSONL. It may contain reasoning,
+identifiers, paths, secrets, tool payloads, and incomplete turns; keep it local.
+Long Codex sessions are emitted as multiple bounded provider records with
+source-event lineage instead of one giant JSONL line. The canonical builder is
+still the only trainer-data mapper.
+The canonical `sft.jsonl` record is instead shaped like:
 
 ```json
 {
+  "schema_version": "ai-data-extraction/v1",
+  "example_id": "sha256:...",
+  "dataset": "sft",
+  "split": "train",
   "messages": [
     {
       "role": "user",
-      "content": "How do I fix this TypeScript error?",
-      "code_context": [
-        {
-          "file": "/Users/user/project/src/index.ts",
-          "code": "const x: string = 123;",
-          "range": {
-            "selectionStartLineNumber": 10,
-            "positionLineNumber": 10
-          }
-        }
-      ],
-      "timestamp": "2025-01-16T14:30:22.123Z"
+      "content": "How do I fix this TypeScript error?"
     },
     {
       "role": "assistant",
-      "content": "The error occurs because you're assigning a number to a string type...",
-      "suggested_diffs": [...],
-      "model": "claude-sonnet-4-5",
-      "timestamp": "2025-01-16T14:30:25.456Z"
+      "content": "Use a string value or change the declared type."
     }
   ],
-  "source": "cursor-composer",
-  "name": "TypeScript Type Error Fix",
-  "created_at": 1705414222000
+  "tags": ["provider:cursor", "task:debugging", "privacy:review"],
+  "quality": {"status": "review"},
+  "privacy": {"eligible_for_training": false}
 }
 ```
 
@@ -272,22 +396,26 @@ Each script follows this pattern:
 
 ## 🔧 Advanced Usage
 
-### Merge All Extractions
+### Normalize all extractions
 
 ```bash
-# Combine all JSONL files
-cat extracted_data/*.jsonl > all_conversations.jsonl
+# Raw files are not concatenated. Normalize and deduplicate them instead.
+python3 build_training_data.py extracted_data --output-dir training_data \
+  --oversize-strategy chunk
 
-# Count total conversations
-wc -l all_conversations.jsonl
-
-# Count by source
-grep -o '"source":"[^"]*"' all_conversations.jsonl | sort | uniq -c
+# Inspect counts, rejection reasons, hashes, and eligibility
+python3 -m json.tool training_data/manifest.json
 ```
+
+Long sessions are parent containers, not single examples. The default builder
+splits them into bounded, linked segments and emits `action_windows.jsonl` for
+tool-transition review; `--oversize-strategy reject` is available only for
+comparison with the old whole-record policy. See
+[`docs/TRAINING_DATA.md`](docs/TRAINING_DATA.md) for the trainer contract.
 
 ### Create Agent Skills from a corpus
 
-`corpus_to_skills.py` samples extracted conversations and asks an
+`corpus_to_skills.py` samples canonical or filtered conversations and asks an
 OpenAI-compatible chat-completions model to synthesize reusable
 [Agent Skills](https://agentskills.io/specification). Each result is written as
 `<skill-name>/SKILL.md` with validated `name` and `description` metadata.
@@ -441,15 +569,19 @@ from datasets import load_dataset
 
 dataset = load_dataset(
     'json',
-    data_files='extracted_data/*.jsonl',
+    data_files='training_data/sft.jsonl',
     split='train'
 )
 
-# Filter complete conversations
-dataset = dataset.filter(
-    lambda x: any(m['role'] == 'assistant' for m in x['messages'])
-)
+# The builder already rejects incomplete conversations. Keep only records that
+# passed the explicit privacy gate.
+dataset = dataset.filter(lambda x: x['privacy']['eligible_for_training'])
 ```
+
+Use `training_data/preferences.jsonl` for DPO-style training and
+`training_data/rl_prompts.jsonl` only as prompt input for an environment-backed
+RL run. The trajectory file is an offline audit/label surface, not a reward
+function.
 
 ### With Unsloth
 
@@ -556,8 +688,8 @@ conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
 
 ### Large Datasets
 ```bash
-# Process in chunks
-split -l 1000 all_conversations.jsonl chunk_
+# Process a canonical file in chunks only after the manifest has been recorded
+split -l 1000 training_data/sft.jsonl training_sft_chunk_
 
 # Compress for storage
 gzip extracted_data/*.jsonl
@@ -596,6 +728,6 @@ This toolkit extracts YOUR OWN data from locally installed AI tools. Users are r
 
 ---
 
-**Generated**: January 16, 2025
-**Status**: Production Ready
-**Compatibility**: Python 3.6+, macOS/Linux/Windows
+**Updated**: September 16, 2026
+**Status**: Audited implementation; privacy review, source coverage, and model evaluation remain release gates
+**Compatibility**: Python 3.10+, macOS/Linux/Windows
