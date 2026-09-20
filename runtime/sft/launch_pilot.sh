@@ -4,13 +4,14 @@ set -euo pipefail
 SFT_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SFT_DATA_ROOT="/data-120/ai-training"
 SFT_MODEL_ROOT="/data-120/models"
-SFT_RELEASE="${SFT_DATA_ROOT}/datasets/qwen3.5-9b-agent-sft-pilot-v3"
+SFT_RELEASE="${SFT_RELEASE:-${SFT_DATA_ROOT}/datasets/qwen3.5-9b-agent-sft-pilot-v3}"
 SFT_BASE_MODEL="${SFT_MODEL_ROOT}/Qwen3.5-9B"
 SFT_ADAPTER_ROOT="${SFT_MODEL_ROOT}/adapters"
-SFT_ADAPTER_NAME="Qwen3.5-9B-agent-sft-pilot-v3"
+SFT_ADAPTER_NAME="${SFT_ADAPTER_NAME:-Qwen3.5-9B-agent-sft-pilot-v3}"
 SFT_RUN_ROOT="${SFT_DATA_ROOT}/runs"
-SFT_RUN_NAME="qwen3.5-9b-agent-sft-pilot-v3-seed20260920"
-SFT_CACHE="${SFT_DATA_ROOT}/cache/qwen3.5-9b-agent-sft-pilot-v3"
+SFT_RUN_NAME="${SFT_RUN_NAME:-qwen3.5-9b-agent-sft-pilot-v3-seed20260920}"
+SFT_CACHE="${SFT_CACHE:-${SFT_DATA_ROOT}/cache/qwen3.5-9b-agent-sft-pilot-v3}"
+SFT_CONTAINER_NAME="${SFT_CONTAINER_NAME:-qwen35-9b-sft-pilot-v3}"
 SFT_IMAGE="ai-data-extraction/unsloth-xpu:torch2120-768d644"
 SFT_IMAGE_ID="sha256:5f0361b760c438c41ea17416c01ebcf3ed4d57b86d4cf9618f83a3db2121093c"
 SFT_BASELINE_UNIT="qwen35-9b-baseline.service"
@@ -156,7 +157,7 @@ if curl --fail --silent --max-time 2 http://127.0.0.1:8080/v1/models >/dev/null 
 fi
 
 docker run --rm \
-  --name qwen35-9b-sft-pilot-v3 \
+  --name "${SFT_CONTAINER_NAME}" \
   --user "$(id -u):$(id -g)" \
   --group-add "$(getent group render | cut -d: -f3)" \
   --group-add "$(getent group video | cut -d: -f3)" \

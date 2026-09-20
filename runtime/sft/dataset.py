@@ -80,6 +80,8 @@ def validate_example(row: dict[str, Any], *, expected_split: str) -> None:
         "reviewed_final_answer",
         "frontier_action_window",
         "skill_policy",
+        "tool_policy_replay",
+        "verified_open_swe_action",
     }:
         raise ValueError("trainer example lane is invalid")
     messages = row.get("messages")

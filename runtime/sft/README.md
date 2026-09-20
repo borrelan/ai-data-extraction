@@ -24,7 +24,7 @@ No model checkpoint or training cache belongs in the repository or local root
 filesystem. The launcher verifies the local image ID and disables container
 network access.
 
-## Run the pilot
+## Run an immutable release
 
 The immutable local-session control contains 131 training and 44 validation
 examples. Every row passed exact Qwen3.5 chat-template prefix validation at
@@ -37,9 +37,20 @@ The baseline `qwen3.5-9b-baseline` llama.cpp service normally owns the B70.
 runs training, and restores the exact captured command through a user systemd
 unit on success, failure, or interruption.
 
+The launcher defaults to the pinned pilot-v3 qualification control. Override
+all run-owned paths and names together when training another immutable release:
+
 ```bash
+SFT_RELEASE=/data-120/ai-training/datasets/<release> \
+SFT_ADAPTER_NAME=<adapter-name> \
+SFT_RUN_NAME=<run-name> \
+SFT_CACHE=/data-120/ai-training/cache/<cache-name> \
+SFT_CONTAINER_NAME=<unique-container-name> \
 runtime/sft/launch_pilot.sh
 ```
+
+Use `runtime/sft/launch_pilot.sh --preflight-only` with the same environment
+first. The launcher refuses to overwrite an existing adapter or run directory.
 
 Durable outputs are:
 
