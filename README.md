@@ -583,6 +583,46 @@ Use `training_data/preferences.jsonl` for DPO-style training and
 RL run. The trajectory file is an offline audit/label surface, not a reward
 function.
 
+### Same-State Preference Training
+
+`build_agent_preference_curriculum.py` composes trainer-neutral
+`prompt`/`chosen`/`rejected` rows only when both alternatives share the exact
+observable prompt state. It excludes hidden reasoning, malformed alternatives,
+evaluation-prompt overlap, duplicate pair identities, and parent leakage across
+train and validation splits. The output is immutable: the builder refuses an
+existing destination and binds every JSONL file in `manifest.json`.
+
+```bash
+python3 build_agent_preference_curriculum.py \
+  --skill-release /path/to/qualified-skill-sft-release \
+  --sft-release /path/to/qualified-balanced-sft-release \
+  --when2call-source /path/to/pinned/when2call_train_pref.jsonl \
+  --when2call-revision <immutable-revision> \
+  --evaluation-cases /path/to/held-out-cases.jsonl \
+  --blocked-text-pattern '<forbidden-model-facing-pattern>' \
+  --output-dir /path/to/new-preference-release
+```
+
+The local Qwen3.5-9B Intel XPU reference runtime is under `runtime/dpo/`.
+Its image pins TRL by wheel hash, validates rows with the exact tokenizer and
+chat template, pretokenizes both branches without truncation, loads the same
+SFT adapter as trainable policy and frozen reference, and refuses success unless
+the policy changed, the reference did not, and the saved PEFT adapter reloads.
+`launch_local.sh` is intentionally bound to the qualified local paths, image
+digest, B70 device, and baseline service; update those constants as one reviewed
+runtime contract rather than overriding individual stages ad hoc.
+
+```bash
+docker build -t ai-data-extraction/unsloth-xpu-dpo:trl028 runtime/dpo
+runtime/dpo/launch_local.sh --preflight-only
+runtime/dpo/launch_local.sh
+```
+
+Preference accuracy is only a trainer health signal. Promotion still requires
+a held-out, matched-seed behavior comparison and executable long-horizon task
+verification; do not infer agent improvement from training loss or preference
+margin alone.
+
 ### With Unsloth
 
 ```python

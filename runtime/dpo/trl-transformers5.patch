@@ -1,0 +1,13 @@
+--- import_utils.py
++++ import_utils.py
+@@ -24 +24,9 @@
+-from transformers.utils.import_utils import _is_package_available
++from transformers.utils.import_utils import _is_package_available as _transformers_is_package_available
++
++
++def _is_package_available(pkg_name: str, return_version: bool = False):
++    """Restore the pre-Transformers-5 scalar probe expected by TRL 0.28."""
++    available, package_version = _transformers_is_package_available(
++        pkg_name, return_version=return_version
++    )
++    return (available, package_version) if return_version else available
