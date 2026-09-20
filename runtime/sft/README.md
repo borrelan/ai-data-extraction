@@ -15,10 +15,10 @@ a mutable tag, BF16 full-weight training, or a different model checkpoint.
 | Host owner | Container path | Mode | Purpose |
 | --- | --- | --- | --- |
 | `/data-120/models/Qwen3.5-9B` | `/models/Qwen3.5-9B` | read-only | Exact base checkpoint |
-| `/data-120/ai-training/datasets/qwen3.5-9b-agent-sft-pilot-v2` | `/input` | read-only | Immutable 732-row release |
+| `/data-120/ai-training/datasets/qwen3.5-9b-agent-sft-pilot-v3` | `/input` | read-only | Immutable 175-row local-session control |
 | `/data-120/models/adapters` | `/model-output` | read-write | Standard PEFT adapter |
 | `/data-120/ai-training/runs` | `/run-output` | read-write | Checkpoints, metrics, and run manifest |
-| `/data-120/ai-training/cache/qwen3.5-9b-agent-sft-pilot-v2` | `/cache` | read-write | Hugging Face and compiler caches |
+| `/data-120/ai-training/cache/qwen3.5-9b-agent-sft-pilot-v3` | `/cache` | read-write | Hugging Face, compiler, and temporary caches |
 
 No model checkpoint or training cache belongs in the repository or local root
 filesystem. The launcher verifies the local image ID and disables container
@@ -26,10 +26,11 @@ network access.
 
 ## Run the pilot
 
-The immutable release contains 646 training and 86 validation examples. Every
-row passed exact Qwen3.5 chat-template prefix validation at 8,192 tokens without
-truncation. Training uses final-assistant-only loss, rank-16 NF4 QLoRA, one
-epoch, batch size 1, gradient accumulation 8, and seed 20260920.
+The immutable local-session control contains 131 training and 44 validation
+examples. Every row passed exact Qwen3.5 chat-template prefix validation at
+8,192 tokens without truncation. Training uses final-assistant-only loss,
+rank-16 NF4 QLoRA, one epoch, batch size 1, gradient accumulation 8, and seed
+20260920.
 
 The baseline `qwen3.5-9b-baseline` llama.cpp service normally owns the B70.
 `launch_pilot.sh` verifies its executable and model, stops only that service,
@@ -42,8 +43,8 @@ runtime/sft/launch_pilot.sh
 
 Durable outputs are:
 
-- adapter: `/data-120/models/adapters/Qwen3.5-9B-agent-sft-pilot-v2`;
-- run evidence: `/data-120/ai-training/runs/qwen3.5-9b-agent-sft-pilot-v2-seed20260920`.
+- adapter: `/data-120/models/adapters/Qwen3.5-9B-agent-sft-pilot-v3`;
+- run evidence: `/data-120/ai-training/runs/qwen3.5-9b-agent-sft-pilot-v3-seed20260920`.
 
 The trainer revalidates all input hashes, saves checkpoints every 10 optimizer
 steps, rejects non-finite metrics or tensors, and reloads the final adapter

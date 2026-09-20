@@ -83,7 +83,7 @@
   },
   "training": {
     "dataset_schema": "ai-data-extraction/agent-sft-pilot/v1",
-    "dataset_path": "/data-120/ai-training/datasets/qwen3.5-9b-agent-sft-pilot-v2",
+    "dataset_path": "/data-120/ai-training/datasets/qwen3.5-9b-agent-sft-pilot-v3",
     "max_sequence_tokens": 8192,
     "loss": "final-assistant-turn-only",
     "packing": false,
@@ -93,8 +93,8 @@
     "learning_rate": 0.0001,
     "seed": 20260920,
     "checkpoint_steps": 10,
-    "adapter_host_path": "/data-120/models/adapters/Qwen3.5-9B-agent-sft-pilot-v2",
-    "run_host_path": "/data-120/ai-training/runs/qwen3.5-9b-agent-sft-pilot-v2-seed20260920"
+    "adapter_host_path": "/data-120/models/adapters/Qwen3.5-9B-agent-sft-pilot-v3",
+    "run_host_path": "/data-120/ai-training/runs/qwen3.5-9b-agent-sft-pilot-v3-seed20260920"
   },
   "qualification": {
     "network_required": false,

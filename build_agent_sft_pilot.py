@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter, defaultdict
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -36,6 +37,41 @@ FORBIDDEN_VISIBLE = {
 }
 REASONING_KEYS = frozenset(
     {"reasoning", "reasoning_content", "thought", "thoughts", "chain_of_thought"}
+)
+MUTATING_TOOL_NAMES = frozenset(
+    {
+        "apply_patch",
+        "create_file",
+        "delete_file",
+        "delete_memory",
+        "edit_file",
+        "edit_memory",
+        "mcp_stitch_create_project",
+        "morphllmfastapply__edit_file",
+        "replace",
+        "save_memory",
+        "write_file",
+    }
+)
+SHELL_TOOL_NAMES = frozenset({"Bash", "exec_command", "run_shell_command", "shell", "shell_command"})
+SHELL_MUTATION = re.compile(
+    r"(?:^|[;&|]\s*)(?:chmod|chown|cp|install|mkdir|mv|npm\s+install|pip\s+install|"
+    r"rm|touch|yarn\s+add)\b|\bgit\s+(?:add|commit|merge|push|rebase|reset)\b|"
+    r"\bkubectl\s+(?:apply|create|delete|edit|patch|replace|rollout|scale|set)\b|"
+    r"\bterraform\s+(?:apply|destroy|import)\b|(?:^|[^<])>{1,2}(?!>)",
+    re.IGNORECASE,
+)
+NO_MUTATION = re.compile(
+    r"\b(?:do not|don't|must not|never)\b.{0,50}\b(?:change|edit|fix|implement|modify|"
+    r"patch|write)\b|\bwithout\b.{0,30}\b(?:changes?|editing|modifications?)\b|"
+    r"\b(?:read[- ]only|report[- ]only)\b|"
+    r"\b(?:audit|diagnos\w*|inspect|report|review)\b.{0,40}\bonly\b",
+    re.IGNORECASE | re.DOTALL,
+)
+MUTATION_INTENT = re.compile(
+    r"\b(?:add|apply|change|create|delete|deploy|edit|fix|implement|install|migrate|"
+    r"modify|patch|refactor|remove|rename|replace|update|write)\b",
+    re.IGNORECASE,
 )
 
 
@@ -161,6 +197,48 @@ def _target_tool(messages: list[dict[str, Any]]) -> str:
     return "+".join(sorted(names))
 
 
+def _call_signature(call: dict[str, Any]) -> bytes:
+    function = call["function"]
+    return canonical_bytes(
+        {"name": function["name"], "arguments": function["arguments"]}
+    )
+
+
+def _call_mutates(call: dict[str, Any]) -> bool:
+    function = call["function"]
+    name = function["name"]
+    if name in MUTATING_TOOL_NAMES:
+        return True
+    if name not in SHELL_TOOL_NAMES:
+        return False
+    arguments = function["arguments"]
+    command = arguments.get("cmd", arguments.get("command", ""))
+    return isinstance(command, str) and bool(SHELL_MUTATION.search(command))
+
+
+def _action_policy_rejection(messages: list[dict[str, Any]]) -> str | None:
+    target_calls = messages[-1].get("tool_calls") or []
+    prior_signatures = {
+        _call_signature(call)
+        for message in messages[:-1]
+        for call in message.get("tool_calls") or []
+    }
+    if any(_call_signature(call) in prior_signatures for call in target_calls):
+        return "target_repeats_prior_call"
+
+    if not any(_call_mutates(call) for call in target_calls):
+        return None
+    user_messages = [
+        message["content"] for message in messages[:-1] if message.get("role") == "user"
+    ]
+    latest_user = user_messages[-1] if user_messages else ""
+    if NO_MUTATION.search(latest_user):
+        return "target_violates_no_mutation_instruction"
+    if not MUTATION_INTENT.search("\n".join(user_messages)):
+        return "target_mutation_intent_unproven"
+    return None
+
+
 def _action_refs(
     action_dir: Path,
     *,
@@ -186,6 +264,8 @@ def _action_refs(
             reason = _validate_messages(messages)
             if reason is None and not completion[0].get("tool_calls"):
                 reason = "target_has_no_tool_call"
+            if reason is None:
+                reason = _action_policy_rejection(messages)
             view = {"messages": messages}
             reason = reason or _visible_rejection(view, max_characters=max_characters)
             example_id = row.get("example_id")
@@ -257,6 +337,70 @@ def select_action_refs(
         decisions[f"{split}_total_cap_excluded"] = sum(len(rows) for rows in queues.values())
         decisions[f"{split}_selected"] = sum(row["split"] == split for row in selected)
     return selected, decisions
+
+
+def _has_tool_target(row: dict[str, Any]) -> bool:
+    return bool(row["messages"][-1].get("tool_calls"))
+
+
+def effective_action_caps(
+    base_examples: list[dict[str, Any]],
+    *,
+    requested_caps: dict[str, int],
+    max_tool_target_fraction: Fraction,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    if max_tool_target_fraction <= 0 or max_tool_target_fraction >= 1:
+        raise ValueError("max tool-target fraction must be greater than zero and less than one")
+    effective: dict[str, int] = {}
+    report: dict[str, Any] = {}
+    for split in ("train", "validation"):
+        split_rows = [row for row in base_examples if row["split"] == split]
+        tool_rows = sum(_has_tool_target(row) for row in split_rows)
+        if tool_rows * max_tool_target_fraction.denominator > (
+            len(split_rows) * max_tool_target_fraction.numerator
+        ):
+            raise ValueError(f"base {split} rows already exceed tool-target fraction")
+        numerator = (
+            max_tool_target_fraction.numerator * len(split_rows)
+            - max_tool_target_fraction.denominator * tool_rows
+        )
+        denominator = (
+            max_tool_target_fraction.denominator - max_tool_target_fraction.numerator
+        )
+        fraction_cap = max(0, numerator // denominator)
+        effective[split] = min(requested_caps[split], fraction_cap)
+        report[split] = {
+            "base_rows": len(split_rows),
+            "base_tool_target_rows": tool_rows,
+            "requested_action_cap": requested_caps[split],
+            "fraction_action_cap": fraction_cap,
+            "effective_action_cap": effective[split],
+        }
+    return effective, report
+
+
+def target_balance_report(
+    examples: list[dict[str, Any]], *, max_tool_target_fraction: Fraction
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "max_tool_target_fraction": float(max_tool_target_fraction),
+        "splits": {},
+    }
+    for split in ("train", "validation"):
+        rows = [row for row in examples if row["split"] == split]
+        tool_rows = sum(_has_tool_target(row) for row in rows)
+        text_rows = len(rows) - tool_rows
+        if tool_rows * max_tool_target_fraction.denominator > (
+            len(rows) * max_tool_target_fraction.numerator
+        ):
+            raise ValueError(f"{split} tool-target fraction exceeds policy")
+        report["splits"][split] = {
+            "rows": len(rows),
+            "tool_target_rows": tool_rows,
+            "text_target_rows": text_rows,
+            "tool_target_fraction": tool_rows / len(rows) if rows else 0.0,
+        }
+    return report
 
 
 def _json_type(value: Any) -> str:
@@ -601,26 +745,33 @@ def build_pilot(
     train_parent_cap: int = 24,
     validation_parent_cap: int = 16,
     max_characters: int = 24000,
+    max_tool_target_fraction: float = 0.8,
 ) -> dict[str, Any]:
     output_dir = output_dir.resolve()
     if output_dir.exists():
         raise FileExistsError(f"refusing existing output directory: {output_dir}")
+    tool_target_fraction = Fraction(str(max_tool_target_fraction))
     reviewed, reviewed_lineage, reviewed_decisions, reviewed_files = _reviewed_examples(
         reviewed_dir.resolve(), max_characters=max_characters
+    )
+    skills, skill_lineage, skill_bindings = build_skill_curriculum(
+        skill_root=skill_root.resolve(), tool_schema_path=tool_schema_path.resolve()
     )
     action_refs, action_decisions, action_files = _action_refs(
         action_dir.resolve(), max_characters=max_characters
     )
+    effective_caps, balance_caps = effective_action_caps(
+        [*reviewed, *skills],
+        requested_caps={"train": train_cap, "validation": validation_cap},
+        max_tool_target_fraction=tool_target_fraction,
+    )
     selected_refs, cap_decisions = select_action_refs(
         action_refs,
-        total_caps={"train": train_cap, "validation": validation_cap},
+        total_caps=effective_caps,
         parent_caps={"train": train_parent_cap, "validation": validation_parent_cap},
     )
     actions, action_lineage = _load_selected_actions(
         selected_refs, max_characters=max_characters
-    )
-    skills, skill_lineage, skill_bindings = build_skill_curriculum(
-        skill_root=skill_root.resolve(), tool_schema_path=tool_schema_path.resolve()
     )
     all_examples = [*reviewed, *actions, *skills]
     all_lineage = [*reviewed_lineage, *action_lineage, *skill_lineage]
@@ -632,6 +783,9 @@ def build_pilot(
         all_lineage,
         model_dir=model_dir,
         max_length=8192,
+    )
+    target_balance = target_balance_report(
+        all_examples, max_tool_target_fraction=tool_target_fraction
     )
     ids = [row["example_id"] for row in all_examples]
     if len(ids) != len(set(ids)):
@@ -690,8 +844,16 @@ def build_pilot(
             "selection": {
                 "frontier_only": True,
                 "no_raw_session_rebuild": True,
-                "action_total_caps": {"train": train_cap, "validation": validation_cap},
+                "action_requested_caps": {"train": train_cap, "validation": validation_cap},
+                "action_effective_caps": effective_caps,
+                "action_balance_caps": balance_caps,
                 "action_parent_caps": {"train": train_parent_cap, "validation": validation_parent_cap},
+                "action_policy": {
+                    "exact_prior_call_repeat": "reject",
+                    "mutation_without_explicit_intent": "reject",
+                    "mutation_under_latest_no-mutation_instruction": "reject",
+                },
+                "target_balance": target_balance,
                 "max_historical_message_characters": max_characters,
                 "parent_disjoint": True,
                 "parent_split_conflict_resolution": split_resolution,
@@ -752,6 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-parent-cap", type=int, default=24)
     parser.add_argument("--validation-parent-cap", type=int, default=16)
     parser.add_argument("--max-characters", type=int, default=24000)
+    parser.add_argument("--max-tool-target-fraction", type=float, default=0.8)
     return parser
 
 
@@ -771,6 +934,7 @@ def main() -> int:
         train_parent_cap=args.train_parent_cap,
         validation_parent_cap=args.validation_parent_cap,
         max_characters=args.max_characters,
+        max_tool_target_fraction=args.max_tool_target_fraction,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
