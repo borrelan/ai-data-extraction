@@ -4,8 +4,9 @@ Status: implemented contract, 2026-09-17
 
 This recorder is the compatibility owner for the local observable-policy
 events described below. It is not the online-RL trace store. Fresh RL execution
-uses Agent Lightning rollout/attempt/ordered-span records. OpenTelemetry carries
-runtime instrumentation, and OpenObserve receives only an allowlisted,
+uses Agent Lightning v1.0.1 rollouts and attempt-scoped append-only
+model-request/reward/custom events. OpenTelemetry separately carries runtime
+instrumentation, and OpenObserve receives only an allowlisted,
 privacy-filtered operational mirror; neither OpenObserve nor this recorder may
 invent rewards, policy tokens, or environment transitions.
 

@@ -7,7 +7,8 @@ This document describes the current `build_training_data.py` and
 and migration inputs, but they are not the future cross-repository canonical
 owner. Hardened AgentIR owns the target offline corpus and emits ATIF/TRL
 formats as loss-aware projections; Agent Lightning owns fresh online-RL
-rollout/attempt/span records. Do not add a second projection family here.
+rollouts and attempt-scoped model-request/reward/custom events. Do not add a
+second projection family here.
 
 This repository has two data planes:
 

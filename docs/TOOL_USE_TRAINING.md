@@ -28,9 +28,10 @@ The supported owner split is:
    where its XPU/model path is proven; it does not define the corpus. Cloud is
    not a fallback for this 9B lane. A later 27B cloud experiment is separate.
 5. Fresh online RL uses resettable environments and executable verifiers, with
-   Agent Lightning owning Rollout -> Attempt -> ordered span records. Historical
-   transcripts may seed tasks but do not acquire fabricated rewards, token IDs,
-   or policy log-probabilities.
+   Agent Lightning v1.0.1 owning rollout lifecycle and attempt-scoped ordered
+   model-request/reward/custom events. Historical transcripts may seed tasks
+   but do not acquire fabricated rewards, token IDs, or policy
+   log-probabilities.
 6. OpenTelemetry carries runtime instrumentation. OpenObserve stores a
    privacy-filtered operational copy containing correlation IDs, hashes,
    timings, status, counts, and safe reward components. Raw prompts, model

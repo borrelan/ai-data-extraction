@@ -18,7 +18,8 @@ Lightning, not to reconstructed historical rewards.
 OpenTelemetry is used for runtime instrumentation. OpenObserve is the selected
 backend for a privacy-filtered operational copy of those traces; it is not a
 training corpus, reward store, or replacement for Agent Lightning rollout
-records.
+events. Agent Lightning v1.0.1 records attempt-scoped model-request, reward,
+and custom events independently of the OpenTelemetry path.
 
 ## 🎯 What This Does
 
