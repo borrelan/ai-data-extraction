@@ -1,6 +1,12 @@
 # Event, episode, and action-window schema
 
-Status: design gate, 2026-09-16
+Status: implemented compatibility schema and migration reference.
+
+This document describes the `ai-data-extraction/v1` event, episode, and
+action-window behavior that exists in this repository. It no longer selects
+the future canonical owner: hardened AgentIR owns canonical offline records and
+loss-aware projections. The builder described below remains frozen compatibility
+behavior and a parity source for that migration.
 
 The current `ai-data-extraction/v1` records are a useful compatibility format
 for SFT, trajectories, tool traces, preferences, and prompt inventories. They
@@ -11,7 +17,7 @@ and segmentation without changing or rewriting the historical export.
 Builder 1.3.2 also stamps each normalized nested event with an
 `ai-data-extraction/event/v1` schema, stable event ID, local ordinal, and parent
 hash. Native provider event ordering is still an adapter-specific quality gate;
-the current builder reports normalized order rather than claiming a lossless
+the compatibility builder reports normalized order rather than claiming a lossless
 event lake.
 
 The Codex ingress now reads its native event-per-line source in bounded passes
@@ -21,10 +27,10 @@ range, and a `source_origin` file hash. The compatibility
 `extract_codex_session()` helper still returns a full session for explicitly
 bounded callers, but the normal CLI path does not retain or serialize a whole
 long session. The ingress boundary is additive and provider-specific; the
-canonical builder remains the only trainer-data mapper.
+compatibility builder remains the only trainer-data mapper in this repository.
 
 The Codex ingress target is intentionally 25% of the final character safety
-bound. The canonical builder materializes both conversational messages and
+bound. The compatibility builder materializes both conversational messages and
 event projections, so a larger raw segment can pass ingress and fail after
 normalization. This conservative target is an envelope, not a token budget;
 the final validator remains authoritative. Oversized tool observations are
@@ -73,7 +79,7 @@ the user turn. If a call has no source observation, the segment carries
   session ID or source-file hash and never change the source lane. Reviewed
   model-tier overrides use the same immutable identity rule and never invent
   model identity from a provider name alone.
-- The canonical builder preflights all input records by source-session
+- The compatibility builder preflights all input records by source-session
   identity before builder-side chunking. Every segment of one session inherits
   the same `session_quality_id` and gate; the manifest reports both segment
   counts and session counts so duplicated chunks cannot masquerade as new
@@ -331,7 +337,7 @@ quality or advisor influence is not independently reviewed remain in the
 `optional_alt` source lane, while their session quality is assessed separately
 from dialogue/tool/outcome evidence. Advisor overlays such as `__advisor.jsonl`
 carry an explicit contamination flag and default to `quarantine`; that rule is
-about the overlay artifact, not about every Pi-family session. The canonical
+about the overlay artifact, not about every Pi-family session. The compatibility
 default build selects `primary` and preserves the other lanes for explicit,
 separately manifested experiments.
 

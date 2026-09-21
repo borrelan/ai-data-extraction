@@ -1,9 +1,18 @@
-# Canonical training-data contract
+# Compatibility training-data contract
+
+Status: implemented `ai-data-extraction/v1` compatibility behavior.
+
+This document describes the current `build_training_data.py` and
+`trainer_export.py` interfaces in this repository. They remain reproducibility
+and migration inputs, but they are not the future cross-repository canonical
+owner. Hardened AgentIR owns the target offline corpus and emits ATIF/TRL
+formats as loss-aware projections; Agent Lightning owns fresh online-RL
+rollout/attempt/span records. Do not add a second projection family here.
 
 This repository has two data planes:
 
 ```text
-local provider stores -> raw JSONL -> optional Privacy Filter -> canonical builder
+local provider stores -> raw JSONL -> optional Privacy Filter -> compatibility builder
                                                         -> SFT
                                                         -> explicit preferences
                                                         -> trajectories
@@ -40,7 +49,7 @@ identity inherit one `session_quality_id` and one gate; a weak segment boundary
 cannot accidentally turn the rest of a good session into a provider-wide
 rejection, and a good-looking segment cannot hide a session-level integrity
 failure. The preflight runs across selected and unselected provenance lanes.
-The canonical builder also accepts the same provider-neutral override format
+The compatibility builder also accepts the same provider-neutral override format
 with `--quality-overrides`; an override changes only the quality gate and is
 recorded with its automatic gate and reviewer metadata. It cannot promote a
 quarantined provenance lane into the default lane or bypass privacy approval.

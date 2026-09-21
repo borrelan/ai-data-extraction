@@ -1,4 +1,4 @@
-# Tool-use and long-chain training plan
+# Tool-use data and runtime integration
 
 This project should train observable engineering behavior, not hidden chain of
 thought. The supervised unit is a sequence of user-visible messages, skill and
@@ -7,46 +7,40 @@ and a bounded terminal state. A short decision label such as `capability`,
 `risk`, `cost`, `negative-return`, or `user-override` is enough; private
 deliberation is not a dataset requirement.
 
-## Training platform decision
+## Training platform boundary
 
-The project is tool-agnostic at the data and execution-contract layers, not at
-the last trainer call. The canonical artifacts remain versioned JSONL records
-with portable conversational messages, tool schemas, lineage, and harness
-metadata. A thin adapter may materialize them as Hugging Face `datasets`
-Arrow tables or another trainer's format; extraction must not be rewritten for
-each trainer.
+The project is provider/trainer neutral in its canonical data contracts, but a
+training or rollout run must pin its tokenizer, chat template, tool parser,
+optimizer, environment API, and artifact revisions.
 
-The first supported training stack is:
+The supported owner split is:
 
-1. Hugging Face Transformers + Datasets + TRL define dataset semantics and
-   provide SFT, preference, process-supervision, and prompt-only RL
-   interfaces. TRL's current format guide distinguishes conversational SFT,
-   explicit preference, stepwise supervision, and prompt-only GRPO/RLOO data:
-   <https://huggingface.co/docs/trl/dataset_formats>.
-2. Unsloth Core is the first execution target for a measured 27--35B QLoRA or
-   LoRA pilot on the local 64 GB GPU. It is an optimization/runtime choice,
-   not the canonical data model; its current project advertises QLoRA, SFT,
-   DPO, GRPO, and Qwen3.8 support: <https://github.com/unslothai/unsloth>.
-3. TRL GRPO is the small environment-backed prototype. It must use an explicit
-   environment, verifier, and `max_tool_calling_iterations`; the current
-   documentation notes that the default iteration limit is unbounded and that
-   the chat template must be prefix-preserving when tools are enabled:
-   <https://huggingface.co/docs/trl/grpo_trainer>.
-4. veRL is the scale-up RL backend when asynchronous, multi-turn tool rollout
-   is justified. It supports multi-turn tool calling, verifiable rewards, and
-   separate rollout/training backends: <https://github.com/verl-project/verl>.
-   MCP-Universe RL is an orchestration reference for isolated MCP environments
-   and staged rollouts, not a replacement for this repository's canonical
-   contract: <https://arxiv.org/abs/2608.22167>.
+1. `ai-data-extraction` owns private provider ingress and immutable source
+   manifests. Its existing builder/exporter is a frozen compatibility path.
+2. Hardened AgentIR owns canonical offline records, lineage, privacy, quality,
+   lane eligibility, and loss-aware projections. ATIF v1.8 is interchange,
+   not the source of truth.
+3. Hugging Face Datasets/Transformers plus TRL define the first concrete SFT,
+   preference, and prompt-only dataset contracts. PEFT is the portable adapter
+   artifact boundary: <https://huggingface.co/docs/trl/dataset_formats>.
+4. The first model lane is the exact Qwen3.5-9B checkpoint on the local Intel
+   Arc Pro B70. The pinned local runtime may use Unsloth acceleration only
+   where its XPU/model path is proven; it does not define the corpus. Cloud is
+   not a fallback for this 9B lane. A later 27B cloud experiment is separate.
+5. Fresh online RL uses resettable environments and executable verifiers, with
+   Agent Lightning owning Rollout -> Attempt -> ordered span records. Historical
+   transcripts may seed tasks but do not acquire fabricated rewards, token IDs,
+   or policy log-probabilities.
+6. OpenTelemetry carries runtime instrumentation. OpenObserve stores a
+   privacy-filtered operational copy containing correlation IDs, hashes,
+   timings, status, counts, and safe reward components. Raw prompts, model
+   content, tool arguments/results, code/log payloads, private paths, secrets,
+   and hidden reasoning are excluded by default.
 
-This gives us one stable foundation and replaceable execution backends. It
-does not make chat templates, tool parsers, optimizer behavior, or environment
-APIs interchangeable; those are pinned in each run manifest. The official
-Qwen repository currently recommends Unsloth, Swift, and Llama-Factory for
-fine-tuning its open checkpoints, and lists Qwen3.8-27B and Qwen3.6-35B-A3B as
-local candidates: <https://github.com/QwenLM/Qwen3.8>. The initial checkpoint
-is not finally pinned until the real training host passes Phase 0
-memory/template checks.
+The current local SFT runtime contract is documented in
+[`../runtime/sft/README.md`](../runtime/sft/README.md). Runtime compatibility,
+training loss, or a loadable adapter does not prove agentic improvement; the
+untouched and adapted checkpoints must run the same executable task registry.
 
 ## The honest answer on open DevOps data
 
@@ -151,7 +145,7 @@ first-class tool families, while lifecycle health and provenance remain
 preconditions: an unavailable graph or stale index must produce an explicit
 fallback/skip event, not a fabricated semantic answer.
 
-## Training recipe for a 30--35B student
+## Training recipe for the 9B student and later scale-up
 
 Use a staged recipe and keep the teacher out of the execution authority path:
 

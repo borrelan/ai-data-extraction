@@ -1,10 +1,24 @@
 # AI Coding Assistant Corpus and Training-Data Toolkit
 
 Extract local Codex, Claude, Gemini, Cursor, Continue, OpenCode, Prime Agent,
-Pi/Oh My Pi, Trae, and Windsurf histories, then normalize them through one
-privacy-gated boundary for SFT, explicit preference, trajectory, and
-prompt-only RL preparation. Raw exports are evidence and provenance; they are
-not trainer input.
+Pi/Oh My Pi, Trae, and Windsurf histories into source-preserving records. Raw
+exports are evidence and provenance; they are not trainer input.
+
+## Repository boundary
+
+This repository owns private provider discovery, parsing, immutable source
+manifests, and the existing `ai-data-extraction/v1` compatibility pipeline. Its
+builder and `trainer_export.py` remain available for reproducing historical
+artifacts, but they are frozen as future schema/export authorities. New
+canonical corpus and trainer-projection work belongs in the hardened AgentIR
+fork; ATIF and trainer formats are projections from that boundary. Fresh
+online-RL rollouts belong to a resettable execution harness and Agent
+Lightning, not to reconstructed historical rewards.
+
+OpenTelemetry is used for runtime instrumentation. OpenObserve is the selected
+backend for a privacy-filtered operational copy of those traces; it is not a
+training corpus, reward store, or replacement for Agent Lightning rollout
+records.
 
 ## 🎯 What This Does
 
@@ -16,7 +30,7 @@ The extractor layer discovers conversation history including:
 - ✅ Tool use and execution results
 - ✅ Timestamps and metadata
 
-The canonical builder then:
+The compatibility builder then:
 
 - removes reasoning fields and tagged reasoning blocks;
 - normalizes roles, tool calls, tool results, diffs, context, and optional tool schemas;
@@ -33,7 +47,7 @@ See [`docs/TRAINING_DATA.md`](docs/TRAINING_DATA.md) for the contract and
 DevOps, skill/MCP, and RL-facing data contract.
 The harness-owned skill/MCP/permission trace is specified in
 [`docs/HARNESS_TRACE_CONTRACT.md`](docs/HARNESS_TRACE_CONTRACT.md).
-The proposed long-session event/episode/action-window contract is in
+The implemented compatibility event/episode/action-window contract is in
 [`docs/SCHEMA_DESIGN.md`](docs/SCHEMA_DESIGN.md).
 
 Prime Agent and Pi-family sources are retained in explicit provenance lanes:
@@ -95,7 +109,7 @@ Extracts from Continue AI Assistant
 - **Includes**:
   - User/assistant messages
   - Tool calls and results
-  - Raw reasoning blocks (removed by the canonical builder)
+  - Raw reasoning blocks (removed by the compatibility builder)
   - Context items
   - Workspace information
 
@@ -105,7 +119,7 @@ Extracts from Google Gemini CLI
 - **Formats**: JSON session files
 - **Includes**:
   - User/assistant messages
-  - Raw thoughts (removed by the canonical builder)
+  - Raw thoughts (removed by the compatibility builder)
   - Token usage breakdown
   - Model information
   - Project hash and workspace linking
@@ -162,7 +176,7 @@ extractor in `extract_cursor.py` does not cover)
 ### Installation
 
 ```bash
-# Extractors and the canonical builder use the Python 3 standard library.
+# Extractors and the compatibility builder use the Python 3 standard library.
 python3 --version  # Python 3.10+ is required
 ```
 
@@ -300,7 +314,7 @@ different contracts and must be consumed by dataset type.
 Extractor output is provider-specific JSONL. It may contain reasoning,
 identifiers, paths, secrets, tool payloads, and incomplete turns; keep it local.
 Long Codex sessions are emitted as multiple bounded provider records with
-source-event lineage instead of one giant JSONL line. The canonical builder is
+source-event lineage instead of one giant JSONL line. The compatibility builder is
 still the only trainer-data mapper.
 The canonical `sft.jsonl` record is instead shaped like:
 

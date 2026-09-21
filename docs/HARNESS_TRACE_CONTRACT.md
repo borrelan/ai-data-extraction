@@ -2,6 +2,13 @@
 
 Status: implemented contract, 2026-09-17
 
+This recorder is the compatibility owner for the local observable-policy
+events described below. It is not the online-RL trace store. Fresh RL execution
+uses Agent Lightning rollout/attempt/ordered-span records. OpenTelemetry carries
+runtime instrumentation, and OpenObserve receives only an allowlisted,
+privacy-filtered operational mirror; neither OpenObserve nor this recorder may
+invent rewards, policy tokens, or environment transitions.
+
 The executable single-funnel recorder is [`harness_trace.py`](../harness_trace.py).
 It is a provider-neutral library used by a live harness or a replay adapter;
 it does not execute tools and it does not accept hidden reasoning as evidence.
