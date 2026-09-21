@@ -178,6 +178,10 @@ class AgentPreferenceCurriculumTests(unittest.TestCase):
             )
             self.assertEqual(report["counts"]["total"], 1)
             self.assertEqual(len(tokenized["train"]), 1)
+            self.assertEqual(tokenized["train"][0]["pair_id"], pair["pair_id"])
+            self.assertEqual(
+                tokenized["train"][0]["lane"], "skill_policy_preference"
+            )
             self.assertNotEqual(
                 tokenized["train"][0]["chosen_input_ids"],
                 tokenized["train"][0]["rejected_input_ids"],

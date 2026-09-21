@@ -14,6 +14,7 @@ DPO_RUN_NAME="${DPO_RUN_NAME:-qwen3.5-9b-agent-dpo-v1-seed20260920}"
 DPO_CACHE="${DPO_CACHE:-${DPO_DATA_ROOT}/cache/qwen3.5-9b-agent-dpo-v1}"
 DPO_CONTAINER_NAME="${DPO_CONTAINER_NAME:-qwen35-9b-agent-dpo-v1}"
 DPO_MAX_STEPS="${DPO_MAX_STEPS:--1}"
+DPO_MAX_LENGTH="${DPO_MAX_LENGTH:-8192}"
 DPO_IMAGE="ai-data-extraction/unsloth-xpu-dpo:trl028"
 DPO_IMAGE_ID="sha256:38b247740a8114ab55624cd076f52b39d15b533d0a376f2be3f1efc1710f4c4a"
 DPO_BASELINE_UNIT="qwen35-9b-baseline.service"
@@ -48,8 +49,12 @@ if [[ -e "${DPO_RUN_ROOT}/${DPO_RUN_NAME}" ]]; then
   echo "run output already exists: ${DPO_RUN_ROOT}/${DPO_RUN_NAME}" >&2
   exit 1
 fi
-if [[ ! "${DPO_MAX_STEPS}" =~ ^-?[0-9]+$ ]] || [[ "${DPO_MAX_STEPS}" -eq 0 ]]; then
-  echo "DPO_MAX_STEPS must be -1 or a positive integer" >&2
+if [[ "${DPO_MAX_STEPS}" != "-1" && "${DPO_MAX_STEPS}" != "1" ]]; then
+  echo "DPO_MAX_STEPS must be -1 for a full release or 1 for a longest-pair canary" >&2
+  exit 1
+fi
+if [[ ! "${DPO_MAX_LENGTH}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "DPO_MAX_LENGTH must be a positive integer" >&2
   exit 1
 fi
 if [[ ! -c /dev/dri/renderD128 ]]; then
@@ -206,7 +211,7 @@ docker run --rm \
   --input-dir /input \
   --output-dir "/model-output/${DPO_ADAPTER_NAME}" \
   --run-dir "/run-output/${DPO_RUN_NAME}" \
-  --max-length 8192 \
+  --max-length "${DPO_MAX_LENGTH}" \
   --epochs 1 \
   --learning-rate 0.000005 \
   --batch-size 1 \

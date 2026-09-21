@@ -631,6 +631,7 @@ docker run --rm --network=none \
   --when2call-revision <immutable-revision> \
   --evaluation-cases /path/to/held-out-cases.jsonl \
   --model-dir /data-120/models/Qwen3.5-9B \
+  --max-sequence-tokens 8192 \
   --blocked-text-pattern '<forbidden-model-facing-pattern>' \
   --output-dir /path/to/new-v2-preference-release
 ```
@@ -649,6 +650,11 @@ docker build -t ai-data-extraction/unsloth-xpu-dpo:trl028 runtime/dpo
 runtime/dpo/launch_local.sh --preflight-only
 runtime/dpo/launch_local.sh
 ```
+
+`--max-sequence-tokens` and `DPO_MAX_LENGTH` are one release/runtime contract.
+The default is 8192. If a hardware-specific release uses another bound, pass
+the same value to the builder, exact-tokenizer preflight, and launcher; the
+runtime rejects a manifest mismatch rather than truncating a row.
 
 Preference accuracy is only a trainer health signal. Promotion still requires
 a held-out, matched-seed behavior comparison and executable long-horizon task

@@ -26,6 +26,62 @@ def package_versions(names: list[str]) -> dict[str, str]:
     return {name: importlib.metadata.version(name) for name in names}
 
 
+TRAINER_TOKEN_FIELDS = (
+    "prompt_input_ids",
+    "chosen_input_ids",
+    "rejected_input_ids",
+)
+
+
+def token_lengths(row: dict[str, Any]) -> dict[str, int]:
+    prompt = len(row["prompt_input_ids"])
+    chosen_completion = len(row["chosen_input_ids"])
+    rejected_completion = len(row["rejected_input_ids"])
+    return {
+        "prompt": prompt,
+        "chosen_completion": chosen_completion,
+        "rejected_completion": rejected_completion,
+        "chosen_sequence": prompt + chosen_completion,
+        "rejected_sequence": prompt + rejected_completion,
+    }
+
+
+def select_training_rows(
+    rows: list[dict[str, Any]], *, one_step_canary: bool
+) -> tuple[list[dict[str, list[int]]], dict[str, Any] | None]:
+    """Strip provenance fields and make a one-step canary exercise the longest pair."""
+    if not rows:
+        raise ValueError("DPO training split is empty")
+    selected = rows
+    selection = None
+    if one_step_canary:
+        def longest_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, str]:
+            lengths = token_lengths(item[1])
+            return (
+                max(lengths["chosen_sequence"], lengths["rejected_sequence"]),
+                lengths["prompt"],
+                item[1]["pair_id"],
+            )
+
+        source_index, longest = max(
+            enumerate(rows),
+            key=longest_key,
+        )
+        selected = [longest]
+        selection = {
+            "schema_version": "ai-data-extraction/dpo-canary-selection/v1",
+            "strategy": "longest_train_pair",
+            "source_index": source_index,
+            "pair_id": longest["pair_id"],
+            "lane": longest["lane"],
+            "tokens": token_lengths(longest),
+        }
+    payload = [
+        {field: row[field] for field in TRAINER_TOKEN_FIELDS} for row in selected
+    ]
+    return payload, selection
+
+
 def adapter_parameter_sha256(model: Any, adapter_name: str) -> tuple[str, int, int]:
     """Hash one in-memory adapter while normalizing its local PEFT name."""
     import torch
@@ -150,6 +206,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--max-steps", type=int, default=-1)
     args = parser.parse_args()
+    if args.max_steps not in (-1, 1):
+        raise ValueError("max_steps must be -1 for a full release or 1 for a canary")
     for name in ("model_dir", "reference_adapter", "input_dir", "output_dir", "run_dir"):
         setattr(args, name, getattr(args, name).resolve())
     for path in (args.model_dir, args.reference_adapter, args.input_dir):
@@ -173,9 +231,17 @@ def main() -> int:
     from datasets import Dataset
     from trl import DPOConfig, DPOTrainer
 
-    train_dataset = Dataset.from_list(tokenized["train"])
-    validation_dataset = Dataset.from_list(tokenized["validation"])
     canary = args.max_steps > 0
+    train_rows, canary_selection = select_training_rows(
+        tokenized["train"], one_step_canary=canary
+    )
+    validation_rows, _ = select_training_rows(
+        tokenized["validation"], one_step_canary=False
+    )
+    if canary_selection is not None:
+        write_json_atomic(args.run_dir / "canary-selection.json", canary_selection)
+    train_dataset = Dataset.from_list(train_rows)
+    validation_dataset = Dataset.from_list(validation_rows)
     parameter_report = trainable_parameter_report(model)
     trainer_args = DPOConfig(
         output_dir=str(args.run_dir / "trainer"),
@@ -214,6 +280,9 @@ def main() -> int:
         model_adapter_name=None,
         ref_adapter_name="reference",
         precompute_ref_log_probs=False,
+        # DPO scores completion labels only. Avoid materializing the 248K-vocab
+        # LM head over thousands of prompt tokens in each chosen/rejected pair.
+        use_logits_to_keep=True,
     )
     class PretokenizedDPOTrainer(DPOTrainer):
         def _prepare_dataset(self, dataset, processing_class, config, dataset_name):
@@ -333,6 +402,9 @@ def main() -> int:
             "label_smoothing": args.label_smoothing,
             "max_length": args.max_length,
             "truncation": False,
+            "logits_scope": "completion_tail",
+            "use_logits_to_keep": True,
+            "canary_selection": canary_selection,
             "seed": args.seed,
             "metrics": metrics,
             "global_steps": trainer.state.global_step,

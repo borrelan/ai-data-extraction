@@ -227,13 +227,13 @@ def preflight_release(
     *,
     max_length: int,
     retain_tokens: bool = False,
-) -> tuple[dict[str, Any], dict[str, list[dict[str, list[int]]]]]:
+) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     input_dir = input_dir.resolve()
     manifest = load_manifest(input_dir)
     if manifest.get("model", {}).get("max_sequence_tokens") != max_length:
         raise ValueError("runtime max length differs from preference release contract")
     seen: set[str] = set()
-    tokenized: dict[str, list[dict[str, list[int]]]] = {
+    tokenized: dict[str, list[dict[str, Any]]] = {
         "train": [],
         "validation": [],
     }
@@ -262,7 +262,9 @@ def preflight_release(
         splits[split] += 1
         lanes[f"{split}:{row['lane']}"] += 1
         if retain_tokens:
-            tokenized[split].append(trainer_row)
+            tokenized[split].append(
+                {**trainer_row, "pair_id": pair_id, "lane": row["lane"]}
+            )
     if len(seen) != manifest.get("counts", {}).get("total"):
         raise ValueError("preference total does not reconcile with trainer rows")
     token_report = {

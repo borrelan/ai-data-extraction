@@ -60,6 +60,23 @@ PROMOTION_COVERAGE = {
 }
 
 
+def pair_within_token_limit(
+    pair: dict[str, Any],
+    tokenizer: Any,
+    *,
+    max_sequence_tokens: int,
+    token_exclusions: dict[str, str],
+) -> bool:
+    try:
+        render_pair(pair, tokenizer, max_length=max_sequence_tokens)
+        return True
+    except ValueError as exc:
+        if f"exceeds {max_sequence_tokens} tokens" not in str(exc):
+            raise
+        token_exclusions[pair["pair_id"]] = str(exc)
+        return False
+
+
 def _tool_names(example: dict[str, Any]) -> set[str]:
     return {tool["function"]["name"] for tool in example.get("tools") or []}
 
@@ -542,7 +559,10 @@ def build_curriculum_v2(
     open_swe_validation_cap_per_family: int = 8,
     when2call_train_cap: int = 36,
     when2call_validation_cap: int = 12,
+    max_sequence_tokens: int = 8192,
 ) -> dict[str, Any]:
+    if max_sequence_tokens <= 0:
+        raise ValueError("max_sequence_tokens must be positive")
     output_dir = output_dir.resolve()
     if output_dir.exists():
         raise FileExistsError(f"refusing existing output directory: {output_dir}")
@@ -556,14 +576,12 @@ def build_curriculum_v2(
     token_exclusions: dict[str, str] = {}
 
     def pair_gate(pair: dict[str, Any]) -> bool:
-        try:
-            render_pair(pair, tokenizer, max_length=8192)
-            return True
-        except ValueError as exc:
-            if "exceeds 8192 tokens" not in str(exc):
-                raise
-            token_exclusions[pair["pair_id"]] = str(exc)
-            return False
+        return pair_within_token_limit(
+            pair,
+            tokenizer,
+            max_sequence_tokens=max_sequence_tokens,
+            token_exclusions=token_exclusions,
+        )
 
     skill = build_skill_preferences_v2(
         source_release=skill_release.resolve(),
@@ -640,7 +658,7 @@ def build_curriculum_v2(
                 "local_path": "/data-120/models/Qwen3.5-9B",
                 "reference_adapter": "/data-120/models/adapters/Qwen3.5-9B-agent-sft-curriculum-v1",
                 "chat_template_kwargs": {"enable_thinking": False},
-                "max_sequence_tokens": 8192,
+                "max_sequence_tokens": max_sequence_tokens,
             },
             "sources": {
                 "skill_policy": {"path": str(skill_release.resolve()), **skill[3]},
@@ -679,7 +697,7 @@ def build_curriculum_v2(
                     "chat_template_sha256": hashlib.sha256(
                         str(tokenizer.chat_template).encode("utf-8")
                     ).hexdigest(),
-                    "max_sequence_tokens": 8192,
+                    "max_sequence_tokens": max_sequence_tokens,
                     "excluded": len(token_exclusions),
                     "excluded_reasons": dict(
                         sorted(Counter(token_exclusions.values()).items())
@@ -728,6 +746,7 @@ def main() -> int:
     parser.add_argument("--open-swe-validation-cap-per-family", type=int, default=8)
     parser.add_argument("--when2call-train-cap", type=int, default=36)
     parser.add_argument("--when2call-validation-cap", type=int, default=12)
+    parser.add_argument("--max-sequence-tokens", type=int, default=8192)
     args = parser.parse_args()
     result = build_curriculum_v2(
         skill_release=args.skill_release,
@@ -742,6 +761,7 @@ def main() -> int:
         open_swe_validation_cap_per_family=args.open_swe_validation_cap_per_family,
         when2call_train_cap=args.when2call_train_cap,
         when2call_validation_cap=args.when2call_validation_cap,
+        max_sequence_tokens=args.max_sequence_tokens,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
