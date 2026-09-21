@@ -13,7 +13,6 @@ Unsloth, TRL, or another trainer without coupling extraction to one trainer.
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_right
 import hashlib
 import json
 import os
@@ -29,8 +28,9 @@ from typing import Any, Iterable, Iterator
 
 SCHEMA_VERSION = "ai-data-extraction/v1"
 EVENT_SCHEMA_VERSION = "ai-data-extraction/event/v1"
-ACTION_WINDOW_SCHEMA_VERSION = "ai-data-extraction/action-window/v1"
-BUILDER_VERSION = "1.3.6"
+ACTION_WINDOW_SCHEMA_VERSION = "ai-data-extraction/action-window/v2"
+ACTION_EVIDENCE_SCHEMA_VERSION = "ai-data-extraction/action-evidence/v1"
+BUILDER_VERSION = "1.4.0"
 PARSER_REVISION = f"ai-data-extraction/build_training_data@{BUILDER_VERSION}"
 CHUNK_STRATEGIES = frozenset({"chunk", "reject"})
 TRAINING_LANES = frozenset({"primary", "optional_alt", "quarantine"})
@@ -1830,6 +1830,24 @@ def tool_name(value: Any) -> str:
     return normalize_token(name) or "unknown"
 
 
+def explicit_result_code(raw: dict[str, Any], payload: Any) -> tuple[int | None, str]:
+    """Preserve only structured process result codes; never parse output prose."""
+
+    values: set[int] = set()
+    for candidate in (raw, payload, raw.get("metadata"), raw.get("details")):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("returncode", "return_code", "exit_code", "exitCode"):
+            value = candidate.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                values.add(value)
+    if len(values) == 1:
+        return next(iter(values)), "structured_field"
+    if len(values) > 1:
+        return None, "conflicting_structured_fields"
+    return None, "absent"
+
+
 def make_tool_event(
     value: Any,
     *,
@@ -1843,12 +1861,14 @@ def make_tool_event(
         raw,
         ("id", "callID", "call_id", "toolCallId", "tool_call_id", "tool_use_id"),
     )
+    status = event_status(raw.get("status") or raw.get("state"))
     event: dict[str, Any] = {
         "kind": kind,
         "message_index": message_index,
         "call_id": normalize_token(call_id),
         "name": tool_name(raw),
-        "status": event_status(raw.get("status") or raw.get("state")),
+        "status": status,
+        "status_source": "structured_status" if status != "unknown" else "absent",
     }
     if kind == "action":
         payload = first_value(raw, ("input", "arguments", "parameters"))
@@ -1862,8 +1882,20 @@ def make_tool_event(
     else:
         payload = first_value(raw, ("output", "result", "content", "error"))
         event["output"] = clean_value(payload, state, privacy_enabled=privacy_enabled)
+        result_code, result_code_source = explicit_result_code(raw, payload)
+        event["result_code"] = result_code
+        event["result_code_source"] = result_code_source
         if raw.get("error") is not None:
             event["status"] = "failure"
+            event["status_source"] = "structured_error"
+        elif result_code is not None:
+            result_status = "success" if result_code == 0 else "failure"
+            if event["status"] == "unknown":
+                event["status"] = result_status
+                event["status_source"] = "structured_result_code"
+            elif event["status"] != result_status:
+                event["status"] = "unknown"
+                event["status_source"] = "conflicting_structured_evidence"
     return event
 
 
@@ -2891,6 +2923,258 @@ def validate_dataset_record(record: dict[str, Any], dataset: str) -> None:
         raise ValueError(f"Unknown dataset: {dataset}")
 
 
+def _action_signature(event: dict[str, Any]) -> str:
+    return stable_id({"name": event.get("name") or "unknown", "input": event.get("input")})
+
+
+def _match_action_observations(
+    events: list[dict[str, Any]],
+) -> dict[int, tuple[int | None, dict[str, Any] | None, str]]:
+    """Assign each observation to at most one action using explicit evidence."""
+
+    actions = [
+        (event_index, event)
+        for event_index, event in enumerate(events)
+        if isinstance(event, dict) and event.get("kind") == "action"
+    ]
+    observations = [
+        (event_index, event)
+        for event_index, event in enumerate(events)
+        if isinstance(event, dict) and event.get("kind") == "observation"
+    ]
+    matches: dict[int, tuple[int | None, dict[str, Any] | None, str]] = {
+        event_index: (None, None, "unmatched") for event_index, _event in actions
+    }
+    consumed_observations: set[int] = set()
+    actions_by_call_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    observations_by_call_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for event_index, event in actions:
+        call_id = event.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            actions_by_call_id.setdefault(call_id, []).append((event_index, event))
+    for event_index, event in observations:
+        call_id = event.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            observations_by_call_id.setdefault(call_id, []).append((event_index, event))
+
+    # A call ID is exact only when it identifies one action and one observation.
+    for call_id, action_candidates in actions_by_call_id.items():
+        observation_candidates = observations_by_call_id.get(call_id, [])
+        if len(action_candidates) != 1 or len(observation_candidates) != 1:
+            continue
+        action_index, _action = action_candidates[0]
+        observation_index, observation = observation_candidates[0]
+        matches[action_index] = (observation_index, observation, "call-id")
+        consumed_observations.add(observation_index)
+
+    # Event intervals are disjoint. A sole non-conflicting observation between
+    # this action and the next action is ordered evidence; multiple candidates
+    # remain unmatched instead of being guessed or reused.
+    observation_cursor = 0
+    for action_ordinal, (action_index, action_event) in enumerate(actions):
+        next_action_index = (
+            actions[action_ordinal + 1][0]
+            if action_ordinal + 1 < len(actions)
+            else len(events)
+        )
+        interval_candidates: list[tuple[int, dict[str, Any]]] = []
+        while (
+            observation_cursor < len(observations)
+            and observations[observation_cursor][0] <= action_index
+        ):
+            observation_cursor += 1
+        scan_cursor = observation_cursor
+        while (
+            scan_cursor < len(observations)
+            and observations[scan_cursor][0] < next_action_index
+        ):
+            observation_index, observation = observations[scan_cursor]
+            if observation_index not in consumed_observations:
+                action_call_id = action_event.get("call_id")
+                observation_call_id = observation.get("call_id")
+                explicit_conflict = (
+                    action_call_id
+                    and observation_call_id
+                    and action_call_id != observation_call_id
+                )
+                if not explicit_conflict:
+                    interval_candidates.append((observation_index, observation))
+            scan_cursor += 1
+        observation_cursor = scan_cursor
+        if matches[action_index][1] is None and len(interval_candidates) == 1:
+            observation_index, observation = interval_candidates[0]
+            matches[action_index] = (observation_index, observation, "event-order")
+            consumed_observations.add(observation_index)
+
+    # Detached legacy fields can place the sole observation before the sole
+    # action. Keep that join explicitly heuristic and reject conflicting IDs.
+    if len(actions) == 1 and len(observations) == 1:
+        action_index, action_event = actions[0]
+        observation_index, observation = observations[0]
+        action_call_id = action_event.get("call_id")
+        observation_call_id = observation.get("call_id")
+        explicit_conflict = (
+            action_call_id
+            and observation_call_id
+            and action_call_id != observation_call_id
+        )
+        if matches[action_index][1] is None and not explicit_conflict:
+            matches[action_index] = (
+                observation_index,
+                observation,
+                "singleton-fallback",
+            )
+    return matches
+
+
+def _action_turn_index(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Group parallel calls from one assistant message into one sequence turn."""
+
+    groups: list[dict[str, Any]] = []
+    by_message: dict[int, dict[str, Any]] = {}
+    for event_index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("kind") != "action":
+            continue
+        message_index = event.get("message_index")
+        group = by_message.get(message_index) if isinstance(message_index, int) else None
+        if group is None:
+            group = {"event_indices": [], "events": []}
+            groups.append(group)
+            if isinstance(message_index, int):
+                by_message[message_index] = group
+        group["event_indices"].append(event_index)
+        group["events"].append(event)
+
+    result: dict[int, dict[str, Any]] = {}
+    signatures: list[str] = []
+    signature_counts: Counter[str] = Counter()
+    last_signature_index: dict[str, int] = {}
+    for ordinal, group in enumerate(groups):
+        signature = stable_id(
+            [
+                {"name": event.get("name") or "unknown", "input": event.get("input")}
+                for event in group["events"]
+            ]
+        )
+        prior_occurrences = signature_counts[signature]
+        prior_index = last_signature_index.get(signature)
+        nearest_distance = ordinal - prior_index if prior_index is not None else None
+        current = [*signatures, signature]
+        periods = [
+            period
+            for period in (2, 3)
+            if len(current) >= period * 2
+            and current[-period * 2 : -period] == current[-period:]
+        ]
+        next_action_index = (
+            groups[ordinal + 1]["event_indices"][0]
+            if ordinal + 1 < len(groups)
+            else len(events)
+        )
+        artifact_hashes = sorted(
+            {
+                stable_id(candidate.get("artifact"))
+                for candidate in events[group["event_indices"][-1] + 1 : next_action_index]
+                if isinstance(candidate, dict) and candidate.get("kind") == "artifact"
+            }
+        )
+        shared = {
+            "turn_ordinal": ordinal,
+            "turn_signature": signature,
+            "calls_in_turn": len(group["events"]),
+            "prior_turn_occurrences": prior_occurrences,
+            "nearest_prior_turn_distance": nearest_distance,
+            "immediate_repeat": nearest_distance == 1,
+            "complete_cycle_periods": periods,
+            "artifact_hashes_before_next_action": artifact_hashes,
+            "families": tool_families(group["events"], []),
+        }
+        for event_index in group["event_indices"]:
+            result[event_index] = shared
+        signatures.append(signature)
+        signature_counts[signature] += 1
+        last_signature_index[signature] = ordinal
+    return result
+
+
+def _action_evidence(
+    *,
+    trajectory: dict[str, Any],
+    event: dict[str, Any],
+    observation: dict[str, Any] | None,
+    observation_match: str,
+    turn: dict[str, Any],
+    prior_observation_digests: list[str],
+) -> dict[str, Any]:
+    action_signature = _action_signature(event)
+    output_digest = (
+        stable_id(
+            {
+                "status": observation.get("status"),
+                "status_source": observation.get("status_source"),
+                "result_code": observation.get("result_code"),
+                "output": observation.get("output"),
+            }
+        )
+        if observation is not None
+        else None
+    )
+    novelty = (
+        output_digest != prior_observation_digests[-1]
+        if output_digest is not None and prior_observation_digests
+        else None
+    )
+    trajectory_outcome = trajectory.get("trajectory", {})
+    if not isinstance(trajectory_outcome, dict):
+        trajectory_outcome = {}
+    return {
+        "schema_version": ACTION_EVIDENCE_SCHEMA_VERSION,
+        "positive_target_status": "not_adjudicated",
+        "action": {
+            "signature": action_signature,
+            "turn_signature": turn["turn_signature"],
+            "turn_ordinal": turn["turn_ordinal"],
+            "calls_in_turn": turn["calls_in_turn"],
+            "families": turn["families"],
+        },
+        "observation": {
+            "joined": observation is not None,
+            "match": observation_match,
+            "match_strength": {
+                "call-id": "exact",
+                "event-order": "ordered",
+                "singleton-fallback": "heuristic",
+                "unmatched": "absent",
+            }[observation_match],
+            "status": observation.get("status", "unknown") if observation is not None else "unknown",
+            "status_source": observation.get("status_source", "absent")
+            if observation is not None
+            else "absent",
+            "result_code": observation.get("result_code") if observation is not None else None,
+            "result_code_source": observation.get("result_code_source", "absent")
+            if observation is not None
+            else "absent",
+            "output_digest": output_digest,
+            "novel_for_same_action": novelty,
+        },
+        "sequence": {
+            "prior_turn_occurrences": turn["prior_turn_occurrences"],
+            "nearest_prior_turn_distance": turn["nearest_prior_turn_distance"],
+            "immediate_repeat": turn["immediate_repeat"],
+            "complete_cycle_periods": turn["complete_cycle_periods"],
+        },
+        "artifacts": {
+            "hashes_before_next_action": turn["artifact_hashes_before_next_action"],
+            "content_included": False,
+        },
+        "episode_outcome": {
+            "value": trajectory_outcome.get("outcome", "unknown"),
+            "source": trajectory_outcome.get("outcome_source", "unscored"),
+            "step_credit": "absent",
+        },
+    }
+
+
 def validate_action_window(record: dict[str, Any]) -> None:
     required = {
         "schema_version",
@@ -2900,6 +3184,7 @@ def validate_action_window(record: dict[str, Any]) -> None:
         "decision",
         "tool_call",
         "observation",
+        "evidence",
         "verification",
         "quality",
         "provenance",
@@ -2931,6 +3216,116 @@ def validate_action_window(record: dict[str, Any]) -> None:
             raise ValueError("Tool-use action window must contain a named call")
     if record["observation"] is not None and not isinstance(record["observation"], dict):
         raise ValueError("Action-window observation must be an object or null")
+    evidence = record["evidence"]
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema_version") != ACTION_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("positive_target_status") != "not_adjudicated"
+    ):
+        raise ValueError("Action-window evidence contract is invalid")
+    action = evidence.get("action")
+    sequence = evidence.get("sequence")
+    observation_evidence = evidence.get("observation")
+    artifacts = evidence.get("artifacts")
+    episode_outcome = evidence.get("episode_outcome")
+    if (
+        not isinstance(action, dict)
+        or not isinstance(action.get("signature"), str)
+        or not isinstance(action.get("turn_signature"), str)
+        or not isinstance(action.get("turn_ordinal"), int)
+        or action["turn_ordinal"] < 0
+        or not isinstance(action.get("calls_in_turn"), int)
+        or action["calls_in_turn"] <= 0
+        or not isinstance(action.get("families"), list)
+        or not all(isinstance(family, str) for family in action["families"])
+    ):
+        raise ValueError("Action-window action evidence is invalid")
+    cycle_periods = sequence.get("complete_cycle_periods") if isinstance(sequence, dict) else None
+    if (
+        not isinstance(sequence, dict)
+        or not isinstance(sequence.get("prior_turn_occurrences"), int)
+        or sequence["prior_turn_occurrences"] < 0
+        or not isinstance(sequence.get("immediate_repeat"), bool)
+        or not isinstance(cycle_periods, list)
+        or not all(
+            isinstance(period, int)
+            and not isinstance(period, bool)
+            and period in {2, 3}
+            for period in cycle_periods
+        )
+        or len(cycle_periods) != len(set(cycle_periods))
+    ):
+        raise ValueError("Action-window sequence evidence is invalid")
+    nearest = sequence.get("nearest_prior_turn_distance")
+    if nearest is not None and (not isinstance(nearest, int) or nearest <= 0):
+        raise ValueError("Action-window recurrence distance is invalid")
+    if sequence["immediate_repeat"] != (nearest == 1):
+        raise ValueError("Action-window immediate-repeat evidence is inconsistent")
+    if sequence["prior_turn_occurrences"] == 0 and nearest is not None:
+        raise ValueError("Action-window prior-occurrence evidence is inconsistent")
+    observation_joined = record["observation"] is not None
+    expected_matches = {
+        "call-id": "exact",
+        "event-order": "ordered",
+        "singleton-fallback": "heuristic",
+        "unmatched": "absent",
+    }
+    if (
+        not isinstance(observation_evidence, dict)
+        or observation_evidence.get("joined") != observation_joined
+        or observation_evidence.get("match") not in expected_matches
+        or observation_evidence.get("match_strength")
+        != expected_matches[observation_evidence["match"]]
+        or observation_joined == (observation_evidence["match"] == "unmatched")
+        or observation_evidence.get("status") not in {"success", "failure", "unknown"}
+        or observation_evidence.get("status_source")
+        not in {
+            "structured_status",
+            "structured_error",
+            "structured_result_code",
+            "conflicting_structured_evidence",
+            "absent",
+        }
+        or observation_evidence.get("result_code_source")
+        not in {"structured_field", "conflicting_structured_fields", "absent"}
+        or (
+            observation_evidence.get("result_code") is not None
+            and (
+                not isinstance(observation_evidence["result_code"], int)
+                or isinstance(observation_evidence["result_code"], bool)
+            )
+        )
+        or (
+            observation_evidence.get("output_digest") is not None
+            and not isinstance(observation_evidence["output_digest"], str)
+        )
+        or observation_evidence.get("novel_for_same_action")
+        not in (True, False, None)
+    ):
+        raise ValueError("Action-window observation evidence is inconsistent")
+    if not observation_joined and any(
+        observation_evidence.get(key) is not None
+        for key in ("result_code", "output_digest", "novel_for_same_action")
+    ):
+        raise ValueError("Missing observations cannot carry derived evidence")
+    artifact_hashes = (
+        artifacts.get("hashes_before_next_action") if isinstance(artifacts, dict) else None
+    )
+    if (
+        not isinstance(artifacts, dict)
+        or not isinstance(artifact_hashes, list)
+        or not all(isinstance(value, str) for value in artifact_hashes)
+        or artifact_hashes != sorted(set(artifact_hashes))
+        or artifacts.get("content_included") is not False
+    ):
+        raise ValueError("Action-window artifact evidence is invalid")
+    if (
+        not isinstance(episode_outcome, dict)
+        or episode_outcome.get("value") not in OUTCOMES
+        or not isinstance(episode_outcome.get("source"), str)
+        or episode_outcome.get("step_credit") != "absent"
+    ):
+        raise ValueError("Action-window episode outcome evidence is invalid")
     if not no_reasoning_content(record):
         raise ValueError("Reasoning content survived action-window normalization")
 
@@ -2967,41 +3362,16 @@ def action_windows_for(
     events = trajectory.get("events") if isinstance(trajectory.get("events"), list) else []
     messages = trajectory.get("messages") if isinstance(trajectory.get("messages"), list) else []
     windows: list[dict[str, Any]] = []
-    observation_candidates = [
-        (candidate_index, candidate)
-        for candidate_index, candidate in enumerate(events)
-        if isinstance(candidate, dict) and candidate.get("kind") == "observation"
-    ]
-    observation_indices = [index for index, _candidate in observation_candidates]
-    observations_by_call_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-    for candidate_index, candidate in observation_candidates:
-        call_id = candidate.get("call_id")
-        if call_id:
-            observations_by_call_id.setdefault(call_id, []).append(
-                (candidate_index, candidate)
-            )
+    observation_matches = _match_action_observations(events)
+    turn_index = _action_turn_index(events)
+    observation_digests_by_action: dict[str, list[str]] = {}
     for event_index, event in enumerate(events):
         if not isinstance(event, dict) or event.get("kind") != "action":
             continue
         call_id = event.get("call_id")
-        observation = None
-        observation_index = None
-        observation_match = "unmatched"
-        if call_id:
-            exact = observations_by_call_id.get(call_id, [])
-            if exact:
-                observation_index, observation = exact[0]
-                observation_match = "call-id"
-        if observation is None:
-            following_index = bisect_right(observation_indices, event_index)
-            if not call_id and following_index < len(observation_candidates):
-                observation_index, observation = observation_candidates[following_index]
-                observation_match = "event-order"
-            elif len(observation_candidates) == 1:
-                # Keep the relationship explicitly heuristic when an adapter
-                # omitted call IDs but supplied exactly one observation.
-                observation_index, observation = observation_candidates[0]
-                observation_match = "singleton-fallback"
+        observation_index, observation, observation_match = observation_matches[
+            event_index
+        ]
 
         message_index = event.get("message_index")
         context_end = (
@@ -3060,6 +3430,17 @@ def action_windows_for(
             bounded_output, output_policy = bounded_window_payload(
                 observation.get("output"), source_status=source_status
             )
+        action_signature = _action_signature(event)
+        evidence = _action_evidence(
+            trajectory=trajectory,
+            event=event,
+            observation=observation,
+            observation_match=observation_match,
+            turn=turn_index[event_index],
+            prior_observation_digests=observation_digests_by_action.get(
+                action_signature, []
+            ),
+        )
         source_metadata = trajectory.get("metadata", {})
         provenance = {
             "parser_revision": source_metadata.get("parser_revision", PARSER_REVISION),
@@ -3130,6 +3511,7 @@ def action_windows_for(
                 if observation is not None
                 else None
             ),
+            "evidence": evidence,
             "verification": {
                 "state_delta_hash": None,
                 "artifact_hashes": [],
@@ -3145,6 +3527,7 @@ def action_windows_for(
                 "observation_output_policy": output_policy,
                 "tool_argument_policy": argument_policy,
                 "observation_match": observation_match,
+                "evidence_schema_version": ACTION_EVIDENCE_SCHEMA_VERSION,
                 "source_episode_status": source_status,
                 "session_quality_gate": session_quality.get("session_quality_gate")
                 if isinstance(session_quality, dict)
@@ -3171,6 +3554,11 @@ def action_windows_for(
         }
         validate_action_window(record)
         windows.append(record)
+        output_digest = evidence["observation"]["output_digest"]
+        if output_digest is not None:
+            observation_digests_by_action.setdefault(action_signature, []).append(
+                output_digest
+            )
     return windows
 
 

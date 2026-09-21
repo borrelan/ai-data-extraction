@@ -168,7 +168,7 @@ be a high-quality, privacy-approved failure demonstration without being a
 successful task, and an apparently successful transcript can remain an
 unverified candidate.
 
-### Action window (`ai-data-extraction/action-window/v1`)
+### Action window (`ai-data-extraction/action-window/v2`)
 
 An action window is a compact supervised decision around one tool or harness
 transition. It is the preferred unit for tool selection, argument validity,
@@ -176,7 +176,7 @@ skill/MCP gating, recovery, and no-tool decisions.
 
 ```json
 {
-  "schema_version": "ai-data-extraction/action-window/v1",
+  "schema_version": "ai-data-extraction/action-window/v2",
   "window_id": "sha256:...",
   "episode_id": "sha256:...",
   "context": {
@@ -203,18 +203,55 @@ skill/MCP gating, recovery, and no-tool decisions.
     "arguments": {}
   },
   "observation": {
-    "status": "success",
+    "status": "unknown",
     "call_id": "call-1",
     "output": "..."
   },
+  "evidence": {
+    "schema_version": "ai-data-extraction/action-evidence/v1",
+    "positive_target_status": "not_adjudicated",
+    "action": {
+      "signature": "sha256:...",
+      "turn_signature": "sha256:...",
+      "turn_ordinal": 3,
+      "calls_in_turn": 1,
+      "families": ["code-navigation"]
+    },
+    "observation": {
+      "joined": true,
+      "match": "call-id",
+      "match_strength": "exact",
+      "status": "unknown",
+      "status_source": "absent",
+      "result_code": null,
+      "result_code_source": "absent",
+      "output_digest": "sha256:...",
+      "novel_for_same_action": null
+    },
+    "sequence": {
+      "prior_turn_occurrences": 0,
+      "nearest_prior_turn_distance": null,
+      "immediate_repeat": false,
+      "complete_cycle_periods": []
+    },
+    "artifacts": {
+      "hashes_before_next_action": [],
+      "content_included": false
+    },
+    "episode_outcome": {
+      "value": "unknown",
+      "source": "unscored",
+      "step_credit": "absent"
+    }
+  },
   "verification": {
-    "state_delta_hash": "sha256:...",
+    "state_delta_hash": null,
     "artifact_hashes": [],
     "tests": [],
     "diagnostics": [],
-    "source": "harness"
+    "source": "unscored"
   },
-  "quality": {"stage": "verifier_backed"},
+  "quality": {"stage": "candidate"},
   "provenance": {"episode_id": "sha256:..."},
   "privacy": {"status": "review", "eligible_for_training": false}
 }
@@ -225,6 +262,14 @@ tool was necessary. For an optional skill skip, `skip_reason` must be a
 concrete negative-return category such as `unavailable`, `out_of_scope`, or
 `measured_regression`; mandatory contract/privacy/safety gates cannot be
 skipped by model text.
+
+Canonical extraction emits tool-use candidates only. The `evidence` object is
+derived from normalized event structure: it may prove a one-to-one observation
+join, structured return code, output change, recurrence/cycle, or artifact
+boundary, but it cannot prove that the action advanced the task. It never
+parses output prose into a status and never promotes
+`positive_target_status=not_adjudicated`. `verification` is reserved for the
+execution harness or explicit adjudication layer.
 
 ## Segmentation algorithm contract
 

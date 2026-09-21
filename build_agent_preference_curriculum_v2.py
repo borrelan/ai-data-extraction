@@ -485,7 +485,12 @@ def cap_when2call(
 
 
 def _verify_release_constraints(
-    pairs: list[dict[str, Any]], lineage: list[dict[str, Any]], excluded_prompts: set[str]
+    pairs: list[dict[str, Any]],
+    lineage: list[dict[str, Any]],
+    excluded_prompts: set[str],
+    *,
+    required_train_families: set[str] | frozenset[str] = REQUIRED_TRAIN_FAMILIES,
+    promotion_coverage: dict[str, tuple[str, ...]] = PROMOTION_COVERAGE,
 ) -> dict[str, Any]:
     pair_by_id = {row["pair_id"]: row for row in pairs}
     if len(pair_by_id) != len(pairs):
@@ -515,7 +520,7 @@ def _verify_release_constraints(
     train_families = {
         key.removeprefix("train:") for key in families if key.startswith("train:")
     }
-    missing = sorted(REQUIRED_TRAIN_FAMILIES - train_families)
+    missing = sorted(set(required_train_families) - train_families)
     if missing:
         raise ValueError(f"required_train_preference_family_missing:{','.join(missing)}")
     for split, partitions in partitions_by_split.items():
@@ -529,7 +534,7 @@ def _verify_release_constraints(
         check: {
             family: families.get(f"train:{family}", 0) for family in required_families
         }
-        for check, required_families in PROMOTION_COVERAGE.items()
+        for check, required_families in promotion_coverage.items()
     }
     if any(sum(values.values()) < 2 for values in coverage.values()):
         raise ValueError("promotion_check_has_insufficient_non_eval_coverage")

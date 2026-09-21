@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import tempfile
@@ -5,6 +6,8 @@ import unittest
 from pathlib import Path
 
 from build_training_data import (
+    ACTION_EVIDENCE_SCHEMA_VERSION,
+    ACTION_WINDOW_SCHEMA_VERSION,
     EVENT_SCHEMA_VERSION,
     PARSER_REVISION,
     SCHEMA_VERSION,
@@ -22,6 +25,7 @@ from build_training_data import (
     quality_session_key,
     sha256_file,
     stable_id,
+    validate_action_window,
     validate_dataset_record,
     verify_privacy_manifest,
 )
@@ -60,6 +64,81 @@ def long_session_record():
         "source": "codex",
         "session_id": "long-session",
         "messages": messages,
+    }
+
+
+def action_trajectory(events):
+    """Build a minimal normalized trajectory for action-window contract tests."""
+
+    normalized_events = []
+    for ordinal, source in enumerate(events):
+        event = copy.deepcopy(source)
+        event.setdefault("schema_version", EVENT_SCHEMA_VERSION)
+        event.setdefault("event_id", stable_id({"ordinal": ordinal, "event": event}))
+        event.setdefault("ordinal", ordinal)
+        event.setdefault("parent_record_sha256", "parent-fixture")
+        normalized_events.append(event)
+    max_message_index = max(
+        (
+            event["message_index"]
+            for event in normalized_events
+            if isinstance(event.get("message_index"), int)
+        ),
+        default=0,
+    )
+    messages = [{"role": "user", "content": "Investigate the failure."}]
+    messages.extend(
+        {"role": "assistant", "content": f"Observable step {index}."}
+        for index in range(1, max_message_index + 1)
+    )
+    return {
+        "example_id": stable_id(normalized_events),
+        "messages": messages,
+        "events": normalized_events,
+        "tools": [],
+        "trajectory": {
+            "outcome": "unknown",
+            "outcome_source": "unscored",
+        },
+        "metadata": {
+            "parser_revision": PARSER_REVISION,
+            "parent_record_sha256": "parent-fixture",
+        },
+        "quality": {
+            "session_quality_gate": "candidate",
+            "session_quality_id": "quality-fixture",
+            "session_quality_flags": [],
+            "model_tier": "tier1_frontier",
+        },
+        "lineage": {"parent_record_sha256": "parent-fixture"},
+        "tags": ["provider:codex", "tier:tier1-frontier"],
+        "privacy": {"eligible_for_training": False},
+    }
+
+
+def action(name, arguments, *, message_index, call_id):
+    return {
+        "kind": "action",
+        "message_index": message_index,
+        "call_id": call_id,
+        "name": name,
+        "status": "unknown",
+        "status_source": "absent",
+        "input": arguments,
+    }
+
+
+def observation(output, *, message_index, call_id, status="unknown"):
+    return {
+        "kind": "observation",
+        "message_index": message_index,
+        "call_id": call_id,
+        "name": "shell",
+        "status": status,
+        "status_source": "absent",
+        "result_code": None,
+        "result_code_source": "absent",
+        "output": output,
     }
 
 
@@ -994,6 +1073,288 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(trajectory["trajectory"]["reward"], 0.75)
         self.assertEqual(trajectory["trajectory"]["reward_status"], "source")
         self.assertTrue(trajectory["trajectory"]["terminal"])
+
+
+class ActionWindowEvidenceTests(unittest.TestCase):
+    def test_unstructured_output_is_observed_but_not_promoted_to_success(self):
+        record = {
+            "source": "codex",
+            "session_id": "unstructured-result",
+            "messages": [
+                {"role": "user", "content": "Run the tests."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "shell",
+                                "arguments": {"command": "pytest"},
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "2 passed"},
+                {"role": "assistant", "content": "The command completed."},
+            ],
+        }
+
+        _, trajectory, _, rejection, _ = normalize_record(**source_args(record))
+        windows = action_windows_for(trajectory)
+
+        self.assertIsNone(rejection)
+        self.assertEqual(windows[0]["schema_version"], ACTION_WINDOW_SCHEMA_VERSION)
+        evidence = windows[0]["evidence"]
+        self.assertEqual(evidence["schema_version"], ACTION_EVIDENCE_SCHEMA_VERSION)
+        self.assertEqual(evidence["positive_target_status"], "not_adjudicated")
+        self.assertEqual(evidence["observation"]["match"], "call-id")
+        self.assertEqual(evidence["observation"]["match_strength"], "exact")
+        self.assertEqual(evidence["observation"]["status"], "unknown")
+        self.assertEqual(evidence["observation"]["status_source"], "absent")
+        self.assertIsNone(evidence["observation"]["result_code"])
+        self.assertNotIn("2 passed", json.dumps(evidence))
+
+    def test_structured_result_codes_preserve_success_and_failure(self):
+        for result_code, expected_status in ((0, "success"), (7, "failure")):
+            with self.subTest(result_code=result_code):
+                record = {
+                    "source": "codex",
+                    "session_id": f"structured-result-{result_code}",
+                    "messages": [
+                        {"role": "user", "content": "Run the command."},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": {"command": "check"},
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call-1",
+                            "content": "opaque output",
+                            "exit_code": result_code,
+                        },
+                        {"role": "assistant", "content": "The command completed."},
+                    ],
+                }
+
+                _, trajectory, _, rejection, _ = normalize_record(**source_args(record))
+                window = action_windows_for(trajectory)[0]
+
+                self.assertIsNone(rejection)
+                observation_event = next(
+                    event
+                    for event in trajectory["events"]
+                    if event["kind"] == "observation"
+                )
+                self.assertEqual(observation_event["status"], expected_status)
+                self.assertEqual(
+                    observation_event["status_source"], "structured_result_code"
+                )
+                self.assertEqual(observation_event["result_code"], result_code)
+                self.assertEqual(
+                    window["evidence"]["observation"]["result_code"], result_code
+                )
+                self.assertEqual(
+                    window["evidence"]["observation"]["status"], expected_status
+                )
+
+    def test_conflicting_structured_status_and_result_code_remain_unknown(self):
+        record = {
+            "source": "codex",
+            "session_id": "conflicting-result",
+            "messages": [
+                {"role": "user", "content": "Run the command."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "shell",
+                                "arguments": {"command": "check"},
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": "opaque output",
+                    "status": "success",
+                    "exit_code": 7,
+                },
+                {"role": "assistant", "content": "The command completed."},
+            ],
+        }
+
+        _, trajectory, _, rejection, _ = normalize_record(**source_args(record))
+        evidence = action_windows_for(trajectory)[0]["evidence"]["observation"]
+
+        self.assertIsNone(rejection)
+        self.assertEqual(evidence["status"], "unknown")
+        self.assertEqual(evidence["status_source"], "conflicting_structured_evidence")
+        self.assertEqual(evidence["result_code"], 7)
+
+    def test_immediate_recurrence_and_observation_novelty_are_separate_facts(self):
+        events = [
+            action("shell", {"command": "check"}, message_index=1, call_id="a-1"),
+            observation("first", message_index=1, call_id="a-1"),
+            action("shell", {"command": "check"}, message_index=2, call_id="a-2"),
+            observation("second", message_index=2, call_id="a-2"),
+            action("shell", {"command": "check"}, message_index=3, call_id="a-3"),
+            observation("second", message_index=3, call_id="a-3"),
+        ]
+
+        windows = action_windows_for(action_trajectory(events))
+
+        self.assertIsNone(windows[0]["evidence"]["observation"]["novel_for_same_action"])
+        self.assertTrue(windows[1]["evidence"]["observation"]["novel_for_same_action"])
+        self.assertFalse(windows[2]["evidence"]["observation"]["novel_for_same_action"])
+        self.assertTrue(windows[1]["evidence"]["sequence"]["immediate_repeat"])
+        self.assertEqual(
+            windows[1]["evidence"]["sequence"]["nearest_prior_turn_distance"], 1
+        )
+
+    def test_period_two_and_period_three_cycles_are_explicit(self):
+        period_two_events = []
+        for index, command in enumerate(("a", "b", "a", "b"), start=1):
+            call_id = f"p2-{index}"
+            period_two_events.extend(
+                [
+                    action(
+                        "shell",
+                        {"command": command},
+                        message_index=index,
+                        call_id=call_id,
+                    ),
+                    observation(command, message_index=index, call_id=call_id),
+                ]
+            )
+        period_three_events = []
+        for index, command in enumerate(("a", "b", "c", "a", "b", "c"), start=1):
+            call_id = f"p3-{index}"
+            period_three_events.extend(
+                [
+                    action(
+                        "shell",
+                        {"command": command},
+                        message_index=index,
+                        call_id=call_id,
+                    ),
+                    observation(command, message_index=index, call_id=call_id),
+                ]
+            )
+
+        period_two = action_windows_for(action_trajectory(period_two_events))[-1]
+        period_three = action_windows_for(action_trajectory(period_three_events))[-1]
+
+        self.assertEqual(period_two["evidence"]["sequence"]["complete_cycle_periods"], [2])
+        self.assertEqual(
+            period_two["evidence"]["sequence"]["nearest_prior_turn_distance"], 2
+        )
+        self.assertFalse(period_two["evidence"]["sequence"]["immediate_repeat"])
+        self.assertEqual(period_three["evidence"]["sequence"]["complete_cycle_periods"], [3])
+        self.assertEqual(
+            period_three["evidence"]["sequence"]["nearest_prior_turn_distance"], 3
+        )
+
+    def test_parallel_calls_share_one_turn_instead_of_forming_a_cycle(self):
+        events = [
+            action("read_file", {"path": "a.py"}, message_index=1, call_id="parallel-a"),
+            action("read_file", {"path": "b.py"}, message_index=1, call_id="parallel-b"),
+            observation("a", message_index=1, call_id="parallel-a"),
+            observation("b", message_index=1, call_id="parallel-b"),
+        ]
+
+        windows = action_windows_for(action_trajectory(events))
+        first = windows[0]["evidence"]
+        second = windows[1]["evidence"]
+
+        self.assertEqual(first["action"]["calls_in_turn"], 2)
+        self.assertEqual(first["action"]["turn_ordinal"], 0)
+        self.assertEqual(first["action"]["turn_signature"], second["action"]["turn_signature"])
+        self.assertEqual(first["sequence"]["prior_turn_occurrences"], 0)
+        self.assertEqual(second["sequence"]["complete_cycle_periods"], [])
+
+    def test_missing_observation_and_artifact_boundary_remain_structural(self):
+        artifact = {"path": "src/main.py", "patch_sha": "abc123"}
+        events = [
+            action("edit", {"path": "src/main.py"}, message_index=1, call_id="edit-1"),
+            observation("written", message_index=1, call_id="edit-1"),
+            {"kind": "artifact", "message_index": 1, "artifact": artifact},
+            action("shell", {"command": "check"}, message_index=2, call_id="check-1"),
+        ]
+
+        windows = action_windows_for(action_trajectory(events))
+
+        self.assertEqual(
+            windows[0]["evidence"]["artifacts"]["hashes_before_next_action"],
+            [stable_id(artifact)],
+        )
+        self.assertFalse(windows[0]["evidence"]["artifacts"]["content_included"])
+        missing = windows[1]["evidence"]["observation"]
+        self.assertFalse(missing["joined"])
+        self.assertEqual(missing["match"], "unmatched")
+        self.assertEqual(missing["match_strength"], "absent")
+        self.assertIsNone(missing["output_digest"])
+
+    def test_singleton_fallback_requires_an_idless_action(self):
+        events = [
+            observation("detached", message_index=0, call_id=None),
+            action("shell", {"command": "check"}, message_index=1, call_id=None),
+        ]
+
+        window = action_windows_for(action_trajectory(events))[0]
+
+        self.assertTrue(window["evidence"]["observation"]["joined"])
+        self.assertEqual(
+            window["evidence"]["observation"]["match"], "singleton-fallback"
+        )
+        self.assertEqual(
+            window["evidence"]["observation"]["match_strength"], "heuristic"
+        )
+
+    def test_observation_is_consumed_by_only_one_ordered_action(self):
+        events = [
+            action("read_file", {"path": "a.py"}, message_index=1, call_id=None),
+            action("read_file", {"path": "b.py"}, message_index=2, call_id=None),
+            observation("only result", message_index=2, call_id=None),
+        ]
+
+        windows = action_windows_for(action_trajectory(events))
+
+        self.assertFalse(windows[0]["evidence"]["observation"]["joined"])
+        self.assertTrue(windows[1]["evidence"]["observation"]["joined"])
+        self.assertEqual(
+            windows[1]["evidence"]["observation"]["match"], "event-order"
+        )
+
+    def test_validator_rejects_reward_promotion_and_invalid_cycle_period(self):
+        events = [
+            action("shell", {"command": "check"}, message_index=1, call_id="call-1"),
+            observation("opaque", message_index=1, call_id="call-1"),
+        ]
+        window = action_windows_for(action_trajectory(events))[0]
+
+        promoted = copy.deepcopy(window)
+        promoted["evidence"]["positive_target_status"] = "accepted"
+        with self.assertRaisesRegex(ValueError, "evidence contract"):
+            validate_action_window(promoted)
+
+        invalid_cycle = copy.deepcopy(window)
+        invalid_cycle["evidence"]["sequence"]["complete_cycle_periods"] = [4]
+        with self.assertRaisesRegex(ValueError, "sequence evidence"):
+            validate_action_window(invalid_cycle)
 
 
 class BuildDatasetTests(unittest.TestCase):

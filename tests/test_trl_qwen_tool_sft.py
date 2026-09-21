@@ -5,6 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from build_training_data import (
+    ACTION_EVIDENCE_SCHEMA_VERSION,
+    ACTION_WINDOW_SCHEMA_VERSION,
+)
 from trl_qwen_tool_sft import (
     ActionWindowIssue,
     NormalizationIssue,
@@ -57,7 +61,7 @@ def _action_window(
         ],
     }
     return {
-        "schema_version": "ai-data-extraction/action-window/v1",
+        "schema_version": ACTION_WINDOW_SCHEMA_VERSION,
         "window_id": window_id,
         "episode_id": f"episode-{window_id}",
         "context": {
@@ -80,8 +84,13 @@ def _action_window(
             "event_id": f"observation-{window_id}",
             "output": "must not be copied into the completion",
         },
+        "evidence": {
+            "schema_version": ACTION_EVIDENCE_SCHEMA_VERSION,
+            "positive_target_status": "verified_positive",
+        },
+        "verification": {"source": "executable_replay"},
         "quality": {
-            "stage": "candidate",
+            "stage": "verifier_backed",
             "session_quality_gate": "candidate",
             "session_quality_flags": ["outcome_unverified"],
             "model_tier": "tier1_frontier",
@@ -98,8 +107,8 @@ def _action_window(
         "tags": ["provider:codex", "tier:tier1-frontier", "quality-gate:candidate"],
         "privacy": {
             "mode": "heuristic",
-            "reason": "review-required",
-            "eligible_for_training": False,
+            "reason": "user-approved-after-filter",
+            "eligible_for_training": True,
         },
     }
 
@@ -290,6 +299,31 @@ class ActionWindowSftTests(unittest.TestCase):
         self.assertIsNone(projected)
         self.assertIn(ActionWindowIssue.TARGET_ARGUMENTS_MISMATCH.value, reasons)
 
+    def test_action_projection_fails_closed_on_unadjudicated_and_legacy_rows(self):
+        source = _action_window("window-1", "parent-1", "open the source file")
+        source["evidence"]["positive_target_status"] = "not_adjudicated"
+
+        projected, reasons = _action_window_prompt_completion(source)
+
+        self.assertIsNone(projected)
+        self.assertIn(ActionWindowIssue.POSITIVE_TARGET_NOT_VERIFIED.value, reasons)
+
+        source["evidence"]["positive_target_status"] = "verified_positive"
+        source["schema_version"] = "ai-data-extraction/action-window/v1"
+        projected, reasons = _action_window_prompt_completion(source)
+
+        self.assertIsNone(projected)
+        self.assertIn(ActionWindowIssue.SOURCE_SCHEMA_UNSUPPORTED.value, reasons)
+
+    def test_action_projection_requires_training_eligible_privacy(self):
+        source = _action_window("window-1", "parent-1", "open the source file")
+        source["privacy"]["eligible_for_training"] = False
+
+        projected, reasons = _action_window_prompt_completion(source)
+
+        self.assertIsNone(projected)
+        self.assertIn(ActionWindowIssue.PRIVACY_NOT_TRAINING_ELIGIBLE.value, reasons)
+
     def test_builder_deduplicates_conflicts_and_malformed_rows(self):
         rows = [
             _action_window("window-1", "parent-1", "request one", call_id="call-one"),
@@ -324,7 +358,12 @@ class ActionWindowSftTests(unittest.TestCase):
             ]
             self.assertEqual(len(selected), 2)
             self.assertTrue(all(row["tags"] and "loss:completion-only" in row["tags"] for row in selected))
-            self.assertTrue(all(row["privacy"]["reason"] == "review-required" for row in selected))
+            self.assertTrue(
+                all(
+                    row["privacy"]["reason"] == "user-approved-after-filter"
+                    for row in selected
+                )
+            )
             self.assertTrue(all("must not be copied" not in json.dumps(row) for row in selected))
 
             decisions = [

@@ -22,11 +22,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from build_training_data import (
+    ACTION_EVIDENCE_SCHEMA_VERSION,
+    ACTION_WINDOW_SCHEMA_VERSION,
+)
+
 
 ADAPTER_SCHEMA = "ai-data-extraction/trl-qwen-tool-sft-adapter/v1"
 EXAMPLE_SCHEMA = "ai-data-extraction/qwen-tool-sft-example/v1"
 ACTION_WINDOW_EXAMPLE_SCHEMA = "ai-data-extraction/qwen-action-window-sft-example/v1"
 ACTION_WINDOW_BUNDLE_SCHEMA = "ai-data-extraction/qwen-action-window-sft-candidate/v1"
+VERIFIED_POSITIVE_STATUS = "verified_positive"
+VERIFIED_QUALITY_STAGES = frozenset({"verified", "verifier_backed"})
+VERIFIED_SOURCES = frozenset({"adjudication", "executable_replay", "harness"})
 
 
 class NormalizationIssue(str, Enum):
@@ -46,6 +54,11 @@ class NormalizationIssue(str, Enum):
 
 class ActionWindowIssue(str, Enum):
     ROW_NOT_OBJECT = "row_not_object"
+    SOURCE_SCHEMA_UNSUPPORTED = "source_schema_unsupported"
+    EVIDENCE_SCHEMA_UNSUPPORTED = "evidence_schema_unsupported"
+    POSITIVE_TARGET_NOT_VERIFIED = "positive_target_not_verified"
+    VERIFICATION_SOURCE_UNSUPPORTED = "verification_source_unsupported"
+    PRIVACY_NOT_TRAINING_ELIGIBLE = "privacy_not_training_eligible"
     WINDOW_ID_MISSING = "window_id_missing"
     EPISODE_ID_MISSING = "episode_id_missing"
     PARENT_ID_MISSING = "parent_id_missing"
@@ -62,7 +75,7 @@ class ActionWindowIssue(str, Enum):
     TARGET_ARGUMENTS_MISMATCH = "target_arguments_mismatch"
     OBSERVATION_MISSING = "observation_missing"
     OBSERVATION_CALL_ID_MISMATCH = "observation_call_id_mismatch"
-    QUALITY_NOT_CANDIDATE = "quality_not_candidate"
+    QUALITY_NOT_VERIFIED = "quality_not_verified"
     MODEL_TIER_NOT_SELECTED = "model_tier_not_selected"
     TAGS_INVALID = "tags_invalid"
     PROVIDER_NOT_IDENTIFIED = "provider_not_identified"
@@ -203,6 +216,23 @@ def _action_window_prompt_completion(
     if not isinstance(row, dict):
         return None, (ActionWindowIssue.ROW_NOT_OBJECT.value,)
 
+    if row.get("schema_version") != ACTION_WINDOW_SCHEMA_VERSION:
+        reasons.add(ActionWindowIssue.SOURCE_SCHEMA_UNSUPPORTED.value)
+    evidence = row.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if evidence.get("schema_version") != ACTION_EVIDENCE_SCHEMA_VERSION:
+        reasons.add(ActionWindowIssue.EVIDENCE_SCHEMA_UNSUPPORTED.value)
+    if evidence.get("positive_target_status") != VERIFIED_POSITIVE_STATUS:
+        reasons.add(ActionWindowIssue.POSITIVE_TARGET_NOT_VERIFIED.value)
+    verification = row.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    if verification.get("source") not in VERIFIED_SOURCES:
+        reasons.add(ActionWindowIssue.VERIFICATION_SOURCE_UNSUPPORTED.value)
+    privacy = row.get("privacy")
+    privacy = privacy if isinstance(privacy, dict) else {}
+    if privacy.get("eligible_for_training") is not True:
+        reasons.add(ActionWindowIssue.PRIVACY_NOT_TRAINING_ELIGIBLE.value)
+
     window_id = row.get("window_id")
     episode_id = row.get("episode_id")
     parent_sha = _window_parent_sha(row)
@@ -286,8 +316,8 @@ def _action_window_prompt_completion(
 
     quality = row.get("quality")
     quality = quality if isinstance(quality, dict) else {}
-    if quality.get("stage") != "candidate":
-        reasons.add(ActionWindowIssue.QUALITY_NOT_CANDIDATE.value)
+    if quality.get("stage") not in VERIFIED_QUALITY_STAGES:
+        reasons.add(ActionWindowIssue.QUALITY_NOT_VERIFIED.value)
     if quality.get("model_tier") != "tier1_frontier":
         reasons.add(ActionWindowIssue.MODEL_TIER_NOT_SELECTED.value)
 

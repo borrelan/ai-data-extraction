@@ -116,9 +116,10 @@ Compatibility dataset rows use `schema_version=ai-data-extraction/v1`, a
 deterministic `example_id`, a deterministic `split` (`train`, `validation`, or
 `test`), provider/task/outcome/model-tier/privacy tags, quality metadata, and
 hashed provenance. `action_windows.jsonl` uses the dedicated
-`ai-data-extraction/action-window/v1` schema. It carries the same
+`ai-data-extraction/action-window/v2` schema. It carries the same
 `session_quality_gate`, `session_quality_id`, `model_tier`, and quality flags
-as its parent episode. No raw full session ID or full source path is exported.
+as its parent episode plus an `ai-data-extraction/action-evidence/v1` object.
+No raw full session ID or full source path is exported.
 
 Accepted rows report `quality.payload_chars` and `quality.event_count`. Token
 counts remain `null`/`not_tokenized` until a pinned target tokenizer is chosen;
@@ -133,7 +134,7 @@ failure label.
 | `sft.jsonl` | SFT / instruction tuning | Complete user-plus-assistant conversations only |
 | `trajectories.jsonl` | Offline audit, analysis, or reward-label preparation | Tool actions, observations, artifacts, context, and explicit terminal state |
 | `tool_traces.jsonl` | Tool-call SFT adapters, tool-use analysis, and RL adapters | Sanitized messages plus action/observation/artifact/context events; includes rows with tool or context data |
-| `action_windows.jsonl` | Tool-use review, process supervision preparation, and verifier enrichment | One observed tool transition with bounded context; skill reads and verification remain explicitly unobserved until the harness supplies evidence |
+| `action_windows.jsonl` | Tool-use review, process supervision preparation, and verifier enrichment | One observed tool transition with bounded context and deterministic structural evidence; every source action remains `positive_target_status=not_adjudicated` until a separate label owner supplies valid outcome evidence |
 | `preferences.jsonl` | DPO / preference trainers | Only source records with explicit `chosen` and `rejected` values |
 | `rl_prompts.jsonl` | GRPO / RLOO / other online RL input | Prompt through the latest user turn; always `reward=null`, `reward_status=unscored` |
 | `rejected.jsonl` | Audit and remediation | Reason codes plus hashes and source location; no rejected content |
@@ -179,11 +180,22 @@ and hash metadata outside the trainer message and do not count it as complete
 verifier evidence.
 
 `action_windows.jsonl` is a candidate projection, not verified process reward.
-It records whether an observation was matched by `call_id`, event order, or a
-singleton fallback. It intentionally does not claim that a skill was read, a
-tool was necessary, or an outcome was verified. Those fields must be enriched
-by the execution harness before they are eligible for process supervision or
-RL.
+Its `evidence` object records deterministic action/turn hashes, one-to-one
+observation-match strength, structured status/result codes, output digests,
+same-action output novelty, immediate recurrence, complete period-2/period-3
+cycles, and artifact hashes before the next action. Parallel calls from one
+assistant message are one sequence turn. Output prose is never parsed into
+success, tests, or reward, and evidence contains hashes rather than copied
+observation or artifact text. Episode outcome is retained with
+`step_credit=absent`; it does not label an individual action.
+
+`verification` remains a separate harness-owned object and stays
+`source=unscored` in canonical extraction. The projection intentionally does
+not claim that a skill was read, a tool was necessary, or an action was a good
+positive target. A trainer adapter must fail closed on
+`positive_target_status=not_adjudicated`; executable replay, explicit
+adjudication, or another named verifier is required before process supervision,
+preference optimization, or RL.
 
 TRL's current dataset guidance maps conversational SFT to `messages`, DPO to
 explicit `prompt`/`chosen`/`rejected`, and GRPO/RLOO to prompt-only records:

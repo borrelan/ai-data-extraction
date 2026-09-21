@@ -661,6 +661,46 @@ a held-out, matched-seed behavior comparison and executable long-horizon task
 verification; do not infer agent improvement from training loss or preference
 margin alone.
 
+### Agent Behavior Comparison
+
+`agent_behavior_gate.py` is the provider-neutral structural diagnostic used
+before an executable repository-task pilot. It detects unchanged-state action
+cycles at periods 1, 2, and 3 while allowing a repeated action after a changed
+observation or an explicit hidden-state transition. The runtime manifest must
+use schema `ai-data-extraction/agent-behavior-runtime/v1` and bind the server
+binary, launch configuration, served model alias, model artifact, and
+precision. The runner additionally binds its source, system prompt, cases,
+tools, sampling settings, seed, endpoint, and runtime contract into every
+result row.
+
+```bash
+python3 agent_behavior_gate.py \
+  --model <served-model-alias> \
+  --runtime-manifest /path/to/runtime-manifest.json \
+  --cases /path/to/held-out-cases.jsonl \
+  --tools /path/to/tool-registry.json \
+  --seed 20260919 \
+  --expected-case-count 48 \
+  --output /path/to/results.jsonl
+```
+
+Run the baseline and candidate with identical evaluation contracts, then
+compare their result files. Multiple seeds are supplied by repeating each
+result option:
+
+```bash
+python3 agent_behavior_compare.py \
+  --baseline-result /path/to/baseline-seed-1.jsonl \
+  --candidate-result /path/to/candidate-seed-1.jsonl \
+  --minimum-pass-delta 1 \
+  --maximum-regressions 0 \
+  --output /path/to/comparison.json
+```
+
+The comparator rejects contract or precision drift and never authorizes the
+full task registry. A passing structural comparison only authorizes a bounded
+real-task pilot with executable verifiers.
+
 ### With Unsloth
 
 ```python
